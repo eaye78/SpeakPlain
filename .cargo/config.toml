@@ -1,0 +1,18 @@
+[source.crates-io]
+replace-with = "ustc"
+
+[source.ustc]
+registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
+
+[net]
+git-fetch-with-cli = true
+
+[build]
+# 限制并行编译 job 数，避免多个 cargo 进程同时争抢 package cache 锁
+jobs = 4
+
+[profile.dev]
+# dev 模式下只优化依赖，加快增量编译
+opt-level = 0
+debug = true
+incremental = true

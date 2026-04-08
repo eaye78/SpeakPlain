@@ -1,0 +1,31 @@
+{
+  "id": "coral-pink",
+  "name": "珊瑚粉",
+  "description": "温柔的珊瑚粉色调，甜美可爱",
+  "author": "SpeakPlain",
+  "version": "1.0.0",
+  "colors": {
+    "background": "#fce4ec",
+    "backgroundGradient": "linear-gradient(135deg, #fce4ec 0%, #f8bbd0 100%)",
+    "textPrimary": "#c2185b",
+    "textSecondary": "#f48fb1",
+    "textActive": "#e91e63",
+    "waveformPrimary": "#e91e63",
+    "waveformSecondary": "#f48fb1",
+    "waveformGradient": "linear-gradient(90deg, #e91e63 0%, #f48fb1 100%)",
+    "dragDot": "#f8bbd0",
+    "dragDotHover": "#e91e63",
+    "processingDot": "#e91e63",
+    "shadowLight": "#ffffff",
+    "shadowDark": "#f8bbd0"
+  },
+  "dimensions": {
+    "borderRadius": 14,
+    "paddingX": 14,
+    "paddingY": 0,
+    "gap": 8
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}

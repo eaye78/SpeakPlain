@@ -1,0 +1,32 @@
+{
+  "id": "classic",
+  "name": "经典",
+  "description": "简洁经典，还原最初的设计",
+  "version": "1.0.0",
+  "author": "SpeakPlain",
+  "hasBackgroundImage": true,
+  "colors": {
+    "background": "#e8ecf3",
+    "backgroundGradient": "linear-gradient(135deg, #e8ecf3 0%, #f0f4f8 100%)",
+    "textPrimary": "#4a5568",
+    "textSecondary": "#8a9ab8",
+    "textActive": "#2563eb",
+    "waveformPrimary": "#3b6beb",
+    "waveformSecondary": "#5a7fd9",
+    "waveformGradient": "linear-gradient(90deg, #3b6beb 0%, #5a7fd9 100%)",
+    "dragDot": "#b0bcd0",
+    "dragDotHover": "#2563eb",
+    "processingDot": "#3b6beb",
+    "shadowLight": "#ffffff",
+    "shadowDark": "#c5cad4"
+  },
+  "dimensions": {
+    "borderRadius": 12,
+    "paddingX": 14,
+    "paddingY": 0,
+    "gap": 8
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}

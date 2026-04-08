@@ -1,0 +1,184 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+:root {
+  /* 皮肤系统CSS变量 - 默认值（经典主题） */
+  --skin-bg: #e8ecf3;
+  --skin-bg-gradient: #e8ecf3;
+  --skin-text-primary: #4a5568;
+  --skin-text-secondary: #8a9ab8;
+  --skin-text-active: #2563eb;
+  --skin-wave-primary: #3b6beb;
+  --skin-wave-secondary: #3b6beb;
+  --skin-wave-gradient: #3b6beb;
+  --skin-drag-dot: #b0bcd0;
+  --skin-drag-dot-hover: #2563eb;
+  --skin-processing-dot: #3b6beb;
+  --skin-shadow-light: #ffffff;
+  --skin-shadow-dark: #c5cad4;
+  --skin-border-radius: 12px;
+  --skin-padding-x: 14px;
+  --skin-padding-y: 0px;
+  --skin-gap: 8px;
+  --skin-transition: 0.3s;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  background: #f5f5f5;
+}
+
+/* indicator 页面背景 */
+body.indicator-page {
+  background: var(--skin-bg-gradient);
+  transition: background var(--skin-transition) ease;
+}
+
+/* 有背景图片时，悬浮框背景透明 */
+body.indicator-page.has-bg-image {
+  background-size: cover;
+  background-position: center;
+}
+
+body.indicator-page.has-bg-image .ind-bar {
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+  background: transparent;
+}
+
+/* 有背景图片时，root 也透明 */
+body.indicator-page.has-bg-image #root {
+  background: transparent;
+}
+
+/* ===== 指示器 — 横向 Bar 设计 ===== */
+
+/* Bar 外壳 */
+.ind-bar {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  padding: 0 10px 0 var(--skin-padding-x);
+  background: var(--skin-bg);
+  box-shadow:
+    4px 4px 12px var(--skin-shadow-dark),
+    -4px -4px 12px var(--skin-shadow-light);
+  user-select: none;
+  overflow: hidden;
+  cursor: default;
+  gap: var(--skin-gap);
+  border-radius: var(--skin-border-radius);
+  transition: all var(--skin-transition) ease;
+}
+
+/* 拖拽点 */
+.ind-drag-dots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  pointer-events: none;
+}
+
+.ind-drag-dot {
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--skin-drag-dot);
+  display: inline-block;
+  transition: background var(--skin-transition) ease;
+}
+
+.ind-drag-handle:hover .ind-drag-dot {
+  background: var(--skin-drag-dot-hover);
+}
+
+/* 计时器 */
+.ind-timer {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+  color: var(--skin-text-secondary);
+  flex-shrink: 0;
+  min-width: 72px;
+  transition: color var(--skin-transition) ease;
+}
+
+.ind-timer--active {
+  color: var(--skin-text-active);
+}
+
+/* 波形区 */
+.ind-waveform {
+  flex: 1;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  position: relative;
+}
+
+/* 波形 Canvas */
+.ind-wave-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.ind-wave-canvas--idle {
+  opacity: 0.4;
+}
+
+/* 识别中跳动点容器，叠在 canvas 上方 */
+.ind-proc-dots {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  inset: 0;
+  background: rgba(232,236,243,0.85);
+}
+
+/* 识别中跳动点 */
+.ind-proc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--skin-processing-dot);
+  animation: ind-dot-bounce 0.7s ease-in-out infinite;
+  opacity: 0.8;
+}
+
+@keyframes ind-dot-bounce {
+  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
+  40%           { transform: translateY(-6px); opacity: 1; }
+}
+
+/* 右侧拖拽区域 */
+.ind-drag-handle {
+  flex-shrink: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+  padding: 0 4px;
+  -webkit-app-region: drag;
+}

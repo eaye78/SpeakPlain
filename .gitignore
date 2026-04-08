@@ -1,0 +1,6 @@
+speakplain/dist/
+speakplain/lib/
+speakplain/models/
+speakplain/node_modules/
+target/
+wiki/

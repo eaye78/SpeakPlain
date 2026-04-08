@@ -1,0 +1,5 @@
+[env]
+# 指定 onnxruntime.dll 的路径（ort 2.0.0-rc.12 需要 ORT 1.19.x）
+# 下载地址: https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip
+# 解压后将 lib\onnxruntime.dll 放到下面路径
+ORT_DYLIB_PATH = "D:/projects/SpeakPlain/speakplain/lib/onnxruntime.dll"

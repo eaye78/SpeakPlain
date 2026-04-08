@@ -1,0 +1,32 @@
+{
+  "id": "rainbow",
+  "name": "彩虹",
+  "description": "活力渐变彩虹色，充满青春气息",
+  "version": "1.0.0",
+  "author": "SpeakPlain",
+  "hasBackgroundImage": true,
+  "colors": {
+    "background": "#667eea",
+    "backgroundGradient": "linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f093fb 100%)",
+    "textPrimary": "#ffffff",
+    "textSecondary": "rgba(255, 255, 255, 0.7)",
+    "textActive": "#ffd700",
+    "waveformPrimary": "#ffd700",
+    "waveformSecondary": "#ff6b6b",
+    "waveformGradient": "linear-gradient(90deg, #ffd700 0%, #ff6b6b 50%, #f093fb 100%)",
+    "dragDot": "rgba(255, 255, 255, 0.5)",
+    "dragDotHover": "#ffd700",
+    "processingDot": "#ffd700",
+    "shadowLight": "rgba(255, 255, 255, 0.3)",
+    "shadowDark": "rgba(0, 0, 0, 0.2)"
+  },
+  "dimensions": {
+    "borderRadius": 16,
+    "paddingX": 16,
+    "paddingY": 0,
+    "gap": 10
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}

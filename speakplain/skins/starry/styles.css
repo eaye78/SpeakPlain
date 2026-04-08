@@ -1,0 +1,50 @@
+/* 星空主题 - 悬浮框样式 */
+
+/* 计时器样式 */
+.ind-timer {
+  font-size: 15px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+  color: var(--skin-text-secondary);
+  text-shadow: 0 0 4px rgba(99, 179, 237, 0.3);
+}
+
+.ind-timer--active {
+  color: var(--skin-text-active);
+  text-shadow: 0 0 12px rgba(99, 179, 237, 0.6);
+  animation: starry-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes starry-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.8; }
+}
+
+/* 波形区域样式 */
+.ind-waveform {
+  position: relative;
+}
+
+.ind-wave-canvas {
+  filter: drop-shadow(0 0 6px rgba(99, 179, 237, 0.5));
+}
+
+/* 处理中动画点 */
+.ind-proc-dot {
+  box-shadow: 0 0 8px rgba(99, 179, 237, 0.6);
+}
+
+/* 拖拽区域 */
+.ind-drag-handle {
+  opacity: 0.6;
+  transition: all 0.3s ease;
+}
+
+.ind-drag-handle:hover {
+  opacity: 1;
+}
+
+.ind-drag-dot {
+  box-shadow: 0 0 4px rgba(99, 179, 237, 0.3);
+}

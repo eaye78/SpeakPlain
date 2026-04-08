@@ -1,0 +1,32 @@
+{
+  "id": "desert",
+  "name": "沙漠",
+  "description": "温暖的大地色调，沉稳舒适",
+  "version": "1.0.0",
+  "author": "SpeakPlain",
+  "hasBackgroundImage": true,
+  "colors": {
+    "background": "#f5e6d3",
+    "backgroundGradient": "linear-gradient(135deg, #f5e6d3 0%, #e8d4b8 50%, #d4a574 100%)",
+    "textPrimary": "#5d4e37",
+    "textSecondary": "#a08060",
+    "textActive": "#c17f4e",
+    "waveformPrimary": "#c17f4e",
+    "waveformSecondary": "#d4a574",
+    "waveformGradient": "linear-gradient(90deg, #c17f4e 0%, #d4a574 100%)",
+    "dragDot": "#c4a882",
+    "dragDotHover": "#c17f4e",
+    "processingDot": "#c17f4e",
+    "shadowLight": "#fff8f0",
+    "shadowDark": "#d4c4b0"
+  },
+  "dimensions": {
+    "borderRadius": 10,
+    "paddingX": 14,
+    "paddingY": 0,
+    "gap": 8
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}

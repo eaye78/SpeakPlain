@@ -1,0 +1,31 @@
+{
+  "id": "mint-green",
+  "name": "薄荷绿",
+  "description": "清新的薄荷绿色调，护眼舒适",
+  "author": "SpeakPlain",
+  "version": "1.0.0",
+  "colors": {
+    "background": "#e8f5e9",
+    "backgroundGradient": "linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%)",
+    "textPrimary": "#2e7d32",
+    "textSecondary": "#81c784",
+    "textActive": "#4caf50",
+    "waveformPrimary": "#4caf50",
+    "waveformSecondary": "#81c784",
+    "waveformGradient": "linear-gradient(90deg, #4caf50 0%, #81c784 100%)",
+    "dragDot": "#a5d6a7",
+    "dragDotHover": "#4caf50",
+    "processingDot": "#4caf50",
+    "shadowLight": "#ffffff",
+    "shadowDark": "#c8e6c9"
+  },
+  "dimensions": {
+    "borderRadius": 16,
+    "paddingX": 16,
+    "paddingY": 0,
+    "gap": 10
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}

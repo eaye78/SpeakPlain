@@ -1,0 +1,32 @@
+{
+  "id": "starry",
+  "name": "星空",
+  "description": "深邃星空配色，科技感十足",
+  "version": "1.0.0",
+  "author": "SpeakPlain",
+  "hasBackgroundImage": true,
+  "colors": {
+    "background": "#1a1f2e",
+    "backgroundGradient": "linear-gradient(135deg, #1a1f2e 0%, #2d3748 50%, #1a202c 100%)",
+    "textPrimary": "#e2e8f0",
+    "textSecondary": "#718096",
+    "textActive": "#63b3ed",
+    "waveformPrimary": "#63b3ed",
+    "waveformSecondary": "#4299e1",
+    "waveformGradient": "linear-gradient(90deg, #4299e1 0%, #63b3ed 50%, #90cdf4 100%)",
+    "dragDot": "#4a5568",
+    "dragDotHover": "#63b3ed",
+    "processingDot": "#63b3ed",
+    "shadowLight": "#2d3748",
+    "shadowDark": "#0d1117"
+  },
+  "dimensions": {
+    "borderRadius": 14,
+    "paddingX": 14,
+    "paddingY": 0,
+    "gap": 8
+  },
+  "animations": {
+    "transitionDuration": "0.3s"
+  }
+}
