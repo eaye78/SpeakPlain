@@ -77,6 +77,46 @@ impl AppState {
             target_hwnd: Arc::new(Mutex::new(0)),
         })
     }
+
+    /// 清理资源，在应用退出前调用
+    pub fn cleanup(&self) {
+        info!("开始清理应用资源...");
+        
+        // 1. 停止音频录制
+        {
+            let mut recorder = self.recorder.lock();
+            if recorder.is_recording() {
+                info!("停止音频录制");
+                let _ = recorder.stop();
+            }
+        }
+        
+        // 2. 释放 ASR 引擎
+        {
+            let mut engine = self.asr_engine.lock();
+            if engine.is_some() {
+                info!("释放 ASR 引擎");
+                *engine = None;
+            }
+        }
+        
+        // 3. 隐藏指示器窗口
+        {
+            let indicator = self.indicator.lock();
+            indicator.hide();
+        }
+        
+        // 4. 保存配置
+        {
+            let config = self.config.lock();
+            let storage = self.storage.lock();
+            if let Err(e) = config.save(&storage) {
+                log::warn!("保存配置失败: {}", e);
+            }
+        }
+        
+        info!("资源清理完成");
+    }
 }
 
 // ── 内部共用函数 ──

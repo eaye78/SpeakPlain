@@ -64,6 +64,13 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
                     if let Some(tray) = app.tray_by_id("main-tray") {
                         let _ = tray.set_visible(false);
                     }
+                    
+                    // 清理应用资源
+                    {
+                        let state: tauri::State<crate::AppState> = app.state();
+                        state.cleanup();
+                    }
+                    
                     app.cleanup_before_exit();
                     std::process::exit(0);
                 }

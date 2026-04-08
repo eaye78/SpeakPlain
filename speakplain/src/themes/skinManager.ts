@@ -13,7 +13,6 @@ import type { SkinConfig, SkinListItem, SkinJson } from "./skinTypes";
 import { builtInSkins, getDefaultSkin } from "./defaultSkins";
 import { emit, listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 // 辅助函数：读取皮肤文件内容（通过后端命令）
 const readSkinFile = async (skinId: string, filename: string): Promise<string | null> => {
