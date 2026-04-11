@@ -7,6 +7,10 @@ use arboard::Clipboard;
 use std::thread;
 use std::time::Duration;
 use log::{info, debug, warn};
+use crate::config::{CommandMapping, ModifierKey};
+
+#[cfg(windows)]
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 pub struct TextPaster {
     clipboard: Clipboard,
@@ -93,6 +97,81 @@ impl TextPaster {
 
     pub fn set_restore_clipboard(&mut self, restore: bool) {
         self.restore_clipboard = restore;
+    }
+}
+
+/// 执行指令映射（支持组合键）
+#[cfg(windows)]
+pub fn execute_command_mapping(mapping: &CommandMapping) -> anyhow::Result<()> {
+    info!("执行指令映射: {} -> {:?} + {}", 
+        mapping.command_text, 
+        mapping.modifier, 
+        mapping.key_name
+    );
+    
+    unsafe {
+        let mut inputs: Vec<INPUT> = Vec::new();
+        
+        // 根据修饰键添加按键按下事件
+        match mapping.modifier {
+            ModifierKey::Ctrl => {
+                inputs.push(create_key_input(0x11, false)); // VK_CONTROL
+            }
+            ModifierKey::Alt => {
+                inputs.push(create_key_input(0x12, false)); // VK_MENU
+            }
+            ModifierKey::Shift => {
+                inputs.push(create_key_input(0x10, false)); // VK_SHIFT
+            }
+            ModifierKey::None => {}
+        }
+        
+        // 添加主按键按下
+        inputs.push(create_key_input(mapping.key_code, false));
+        
+        // 添加主按键释放
+        inputs.push(create_key_input(mapping.key_code, true));
+        
+        // 根据修饰键添加按键释放事件
+        match mapping.modifier {
+            ModifierKey::Ctrl => {
+                inputs.push(create_key_input(0x11, true));
+            }
+            ModifierKey::Alt => {
+                inputs.push(create_key_input(0x12, true));
+            }
+            ModifierKey::Shift => {
+                inputs.push(create_key_input(0x10, true));
+            }
+            ModifierKey::None => {}
+        }
+        
+        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+    }
+    
+    debug!("指令映射执行完成");
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn execute_command_mapping(_mapping: &CommandMapping) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// 创建键盘输入事件
+#[cfg(windows)]
+unsafe fn create_key_input(key_code: i32, key_up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(key_code as u16),
+                wScan: 0,
+                dwFlags: if key_up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     }
 }
 

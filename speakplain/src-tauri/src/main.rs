@@ -12,6 +12,7 @@ mod indicator;
 mod config;
 mod tray;
 mod llm;
+mod command;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -223,6 +224,49 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
         );
 
         info!("识别结果: {}", processed);
+
+        // ── 指令模式处理 ────────────────────────────────────────────
+        // 优先检查指令模式（在 LLM 润色之前）
+        // 从 storage 实时读取指令模式配置（因为用户可能动态开关）
+        let (command_mode_enabled, command_mappings) = {
+            let storage = state.storage.lock();
+            let enabled = storage.get_setting("command_mode_enabled")
+                .ok()
+                .flatten()
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            let mappings = storage.get_command_mappings().ok().unwrap_or_default();
+            log::warn!("[指令模式] 状态: enabled={}, mappings_count={}, processed_text='{}'", 
+                enabled, mappings.len(), processed);
+            (enabled, mappings)
+        };
+        
+        if command_mode_enabled {
+            log::warn!("[指令模式] 已开启，检查是否匹配指令...");
+            // 检查识别结果是否完全匹配某个指令
+            if let Some(mapping) = command::find_command_mapping(&processed, &command_mappings) {
+                info!("[指令模式] 匹配到指令: {} -> {:?} + {}", 
+                    mapping.command_text, mapping.modifier, mapping.key_name);
+                
+                // 执行指令对应的按键操作
+                if let Err(e) = input::execute_command_mapping(mapping) {
+                    log::error!("[指令模式] 执行按键操作失败: {}", e);
+                }
+                
+                // 指令模式下不输入任何文字，直接返回
+                state.indicator.lock().set_done();
+                let auto_hide = state.config.lock().auto_hide_indicator;
+                if auto_hide {
+                    state.indicator.lock().hide_delayed(1000);
+                }
+                app_handle.emit("recognition:complete", "").ok();
+                return;
+            } else {
+                log::warn!("[指令模式] 未匹配到任何指令，继续正常流程");
+            }
+        } else {
+            log::warn!("[指令模式] 未开启，跳过指令检查");
+        }
 
         // ── 说人话 LLM 润色层 ────────────────────────────────────────
         info!("[LLM] 检查条件: llm_enabled={}, llm_provider_id='{}', persona_id='{}'",
@@ -980,6 +1024,7 @@ fn main() {
                 hk_is_rec_hk,
                 hk_press_time,
             )?;
+            
             app.manage(state);
 
             // 创建系统托盘
@@ -1157,6 +1202,12 @@ fn main() {
             test_llm_provider,
             get_llm_config,
             get_llm_provider_defaults,
+            // 指令模式功能
+            command::get_command_mode_enabled,
+            command::set_command_mode_enabled,
+            command::get_command_mappings,
+            command::save_command_mapping,
+            command::delete_command_mapping,
         ])
         .run(tauri::generate_context!())
         .expect("运行应用时出错");

@@ -6,6 +6,7 @@ use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 use log::{info, debug};
+use crate::storage::Storage;
 
 /// 长按判定阈值（毫秒）
 const HOLD_THRESHOLD_MS: u64 = 300;
@@ -142,6 +143,30 @@ impl HotkeyManager {
         *self.hotkey_str.lock() = name;
     }
 
+    /// 设置热键时校验是否与指令映射冲突
+    pub fn set_hotkey_with_validation(
+        &self, 
+        vk: i32,
+        storage: &Storage,
+    ) -> anyhow::Result<()> {
+        // 检查是否与指令映射冲突
+        let mappings = storage.get_command_mappings()?;
+        for mapping in &mappings {
+            if mapping.key_code == vk {
+                return Err(anyhow::anyhow!(
+                    "热键 {} 与指令映射 '{}' 的模拟按键冲突，请先修改指令映射",
+                    vk_to_name(vk),
+                    mapping.command_text
+                ));
+            }
+        }
+        
+        // 设置热键
+        let name = vk_to_name(vk);
+        *self.hotkey_str.lock() = name;
+        Ok(())
+    }
+
     pub fn set_recording_hotkey(&self, recording: bool) {
         self.is_recording_hotkey.store(recording, Ordering::Relaxed);
         if !recording {
@@ -175,6 +200,9 @@ pub mod key_codes {
     pub const VK_CONTROL: i32 = 0x11;
     pub const VK_SHIFT: i32 = 0x10;
     pub const VK_MENU: i32 = 0x12; // Alt
+    pub const VK_RETURN: i32 = 0x0D; // Enter
+    pub const VK_BACK: i32 = 0x08; // Backspace
+    pub const VK_TAB: i32 = 0x09; // Tab
 }
 
 pub fn vk_to_name(vk: i32) -> String {
@@ -197,6 +225,9 @@ pub fn vk_to_name(vk: i32) -> String {
         VK_CONTROL => "Control".to_string(),
         VK_SHIFT => "Shift".to_string(),
         VK_MENU => "Alt".to_string(),
+        VK_RETURN => "Enter".to_string(),
+        VK_BACK => "Backspace".to_string(),
+        VK_TAB => "Tab".to_string(),
         0x41..=0x5A => ((vk as u8 - 0x41 + b'A') as char).to_string(),
         0x30..=0x39 => ((vk as u8 - 0x30 + b'0') as char).to_string(),
         _ => format!("Key({})", vk),

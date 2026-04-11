@@ -3,6 +3,30 @@ use serde::{Serialize, Deserialize};
 use crate::storage::Storage;
 use crate::hotkey::key_codes;
 
+/// 修饰键类型
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ModifierKey {
+    None,
+    Ctrl,
+    Alt,
+    Shift,
+}
+
+impl Default for ModifierKey {
+    fn default() -> Self {
+        ModifierKey::None
+    }
+}
+
+/// 指令映射项
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommandMapping {
+    pub command_text: String,       // 指令文字，如"发送"
+    pub key_code: i32,              // 模拟按键的虚拟键码
+    pub key_name: String,           // 按键名称，如"Enter"
+    pub modifier: ModifierKey,      // 修饰键
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -53,6 +77,10 @@ pub struct AppConfig {
     pub llm_enabled:     bool,   // 是否启用，默认 false
     pub persona_id:      String, // 当前人设 ID，默认 "formal"
     pub llm_provider_id: String, // 当前 LLM Provider ID
+
+    // 指令模式配置
+    pub command_mode_enabled: bool,   // 指令模式开关
+    pub command_mappings: Vec<CommandMapping>, // 指令映射列表
 }
 
 impl Default for AppConfig {
@@ -82,6 +110,21 @@ impl Default for AppConfig {
             llm_enabled:     false,
             persona_id:      "formal".to_string(),
             llm_provider_id: String::new(),
+            command_mode_enabled: false,
+            command_mappings: vec![
+                CommandMapping {
+                    command_text: "发送".to_string(),
+                    key_code: 0x0D,  // VK_RETURN
+                    key_name: "Enter".to_string(),
+                    modifier: ModifierKey::None,
+                },
+                CommandMapping {
+                    command_text: "回车".to_string(),
+                    key_code: 0x0D,
+                    key_name: "Enter".to_string(),
+                    modifier: ModifierKey::None,
+                },
+            ],
         }
     }
 }
@@ -204,6 +247,17 @@ impl AppConfig {
             config.llm_provider_id = value;
         }
 
+        // 加载指令模式配置
+        if let Ok(Some(value)) = storage.get_setting("command_mode_enabled") {
+            config.command_mode_enabled = value == "true";
+        }
+
+        if let Ok(Some(value)) = storage.get_setting("command_mappings") {
+            if let Ok(mappings) = serde_json::from_str::<Vec<CommandMapping>>(&value) {
+                config.command_mappings = mappings;
+            }
+        }
+
         Ok(config)
     }
     
@@ -232,6 +286,8 @@ impl AppConfig {
         storage.set_setting("llm_enabled", &self.llm_enabled.to_string())?;
         storage.set_setting("persona_id", &self.persona_id)?;
         storage.set_setting("llm_provider_id", &self.llm_provider_id)?;
+        storage.set_setting("command_mode_enabled", &self.command_mode_enabled.to_string())?;
+        storage.set_setting("command_mappings", &serde_json::to_string(&self.command_mappings)?)?;
 
         Ok(())
     }

@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { Layout, Tabs, message } from "antd";
-import { SettingOutlined, HistoryOutlined, AudioOutlined } from "@ant-design/icons";
+import { 
+  HistoryOutlined, 
+  AudioOutlined,
+  ThunderboltOutlined,
+  CodeOutlined,
+  MessageOutlined,
+} from "@ant-design/icons";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import Settings from "./components/Settings";
@@ -10,7 +16,7 @@ import { skinManager } from "./themes";
 const { Content } = Layout;
 
 function App() {
-  const [activeTab, setActiveTab] = useState("settings");
+  const [activeTab, setActiveTab] = useState("general");
 
   useEffect(() => {
     // 监听 ASR 引擎初始化结果（后端自动初始化，前端只显示状态）
@@ -60,14 +66,34 @@ function App() {
 
   const items = [
     {
-      key: "settings",
+      key: "general",
       label: (
         <span>
-          <SettingOutlined />
-          设置
+          <ThunderboltOutlined />
+          常规设置
         </span>
       ),
-      children: <Settings />,
+      children: <Settings activeTab="general" />,
+    },
+    {
+      key: "command",
+      label: (
+        <span>
+          <CodeOutlined />
+          指令模式
+        </span>
+      ),
+      children: <Settings activeTab="command" />,
+    },
+    {
+      key: "llm",
+      label: (
+        <span>
+          <MessageOutlined />
+          说人话
+        </span>
+      ),
+      children: <Settings activeTab="llm" />,
     },
     {
       key: "history",

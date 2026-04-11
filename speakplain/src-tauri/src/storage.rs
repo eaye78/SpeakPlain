@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use std::path::PathBuf;
 use log::{info, debug};
 use crate::llm::{LlmProviderConfig, Persona};
+use crate::config::CommandMapping;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryItem {
@@ -366,5 +367,25 @@ impl Storage {
         })?;
         
         items.collect()
+    }
+
+    // ── 指令映射 CRUD ─────────────────────────────────────────────────────────
+
+    /// 获取所有指令映射
+    pub fn get_command_mappings(&self) -> anyhow::Result<Vec<CommandMapping>> {
+        match self.get_setting("command_mappings")? {
+            Some(value) => {
+                let mappings = serde_json::from_str::<Vec<CommandMapping>>(&value)?;
+                Ok(mappings)
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// 保存指令映射列表
+    pub fn set_command_mappings(&self, mappings: &[CommandMapping]) -> anyhow::Result<()> {
+        let value = serde_json::to_string(mappings)?;
+        self.set_setting("command_mappings", &value)?;
+        Ok(())
     }
 }

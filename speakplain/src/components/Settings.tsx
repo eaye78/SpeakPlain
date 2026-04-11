@@ -11,7 +11,6 @@ import {
   message,
   InputNumber,
   Tag,
-  Tabs,
   Input,
   Modal,
   List,
@@ -22,7 +21,6 @@ import {
   KeyOutlined,
   AudioOutlined,
   ThunderboltOutlined,
-  SaveOutlined,
   ReloadOutlined,
   SkinOutlined,
   RobotOutlined,
@@ -33,6 +31,7 @@ import {
   CheckCircleOutlined,
   ApiOutlined,
   EyeOutlined,
+  MacCommandOutlined,
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
@@ -75,6 +74,14 @@ interface LlmConfig {
   persona_id: string;
   llm_provider_id: string;
 }
+
+interface CommandMapping {
+  command_text: string;
+  key_code: number;
+  key_name: string;
+  modifier: "None" | "Ctrl" | "Alt" | "Shift";
+}
+
 const HOTKEY_OPTIONS = [
   { value: 0x70, label: "F1" },
   { value: 0x71, label: "F2" },
@@ -90,15 +97,81 @@ const HOTKEY_OPTIONS = [
   { value: 0x7b, label: "F12" },
 ];
 
+const AVAILABLE_KEYS = [
+  { code: 0x0D, name: "Enter" },
+  { code: 0x1B, name: "Escape" },
+  { code: 0x20, name: "Space" },
+  { code: 0x08, name: "Backspace" },
+  { code: 0x09, name: "Tab" },
+  { code: 0x70, name: "F1" },
+  { code: 0x71, name: "F2" },
+  { code: 0x72, name: "F3" },
+  { code: 0x73, name: "F4" },
+  { code: 0x74, name: "F5" },
+  { code: 0x75, name: "F6" },
+  { code: 0x76, name: "F7" },
+  { code: 0x77, name: "F8" },
+  { code: 0x78, name: "F9" },
+  { code: 0x79, name: "F10" },
+  { code: 0x7a, name: "F11" },
+  { code: 0x7b, name: "F12" },
+  { code: 0x41, name: "A" },
+  { code: 0x42, name: "B" },
+  { code: 0x43, name: "C" },
+  { code: 0x44, name: "D" },
+  { code: 0x45, name: "E" },
+  { code: 0x46, name: "F" },
+  { code: 0x47, name: "G" },
+  { code: 0x48, name: "H" },
+  { code: 0x49, name: "I" },
+  { code: 0x4A, name: "J" },
+  { code: 0x4B, name: "K" },
+  { code: 0x4C, name: "L" },
+  { code: 0x4D, name: "M" },
+  { code: 0x4E, name: "N" },
+  { code: 0x4F, name: "O" },
+  { code: 0x50, name: "P" },
+  { code: 0x51, name: "Q" },
+  { code: 0x52, name: "R" },
+  { code: 0x53, name: "S" },
+  { code: 0x54, name: "T" },
+  { code: 0x55, name: "U" },
+  { code: 0x56, name: "V" },
+  { code: 0x57, name: "W" },
+  { code: 0x58, name: "X" },
+  { code: 0x59, name: "Y" },
+  { code: 0x5A, name: "Z" },
+  { code: 0x30, name: "0" },
+  { code: 0x31, name: "1" },
+  { code: 0x32, name: "2" },
+  { code: 0x33, name: "3" },
+  { code: 0x34, name: "4" },
+  { code: 0x35, name: "5" },
+  { code: 0x36, name: "6" },
+  { code: 0x37, name: "7" },
+  { code: 0x38, name: "8" },
+  { code: 0x39, name: "9" },
+];
+
+const MODIFIER_KEYS = [
+  { value: "None", label: "无" },
+  { value: "Ctrl", label: "Ctrl" },
+  { value: "Alt", label: "Alt" },
+  { value: "Shift", label: "Shift" },
+];
+
 interface ASRModel {
   id: string;
   name: string;
   available: boolean;
 }
 
-function Settings() {
+interface SettingsProps {
+  activeTab: "general" | "command" | "llm";
+}
+
+function Settings({ activeTab }: SettingsProps) {
   const [form] = Form.useForm();
-  const [loading, setLoading] = useState(false);
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [skins, setSkins] = useState<SkinListItem[]>([]);
   const [asrModels, setAsrModels] = useState<ASRModel[]>([]);
@@ -128,16 +201,81 @@ function Settings() {
   const [editingProvider, setEditingProvider] = useState<Partial<LlmProviderConfig> | null>(null);
   const [providerForm] = Form.useForm();
 
+  // ── 指令模式状态 ─────────────────────────────────────────────────
+  const [commandModeEnabled, setCommandModeEnabled] = useState(false);
+  const [commandMappings, setCommandMappings] = useState<CommandMapping[]>([]);
+  const [mappingModalOpen, setMappingModalOpen] = useState(false);
+  const [editingMapping, setEditingMapping] = useState<Partial<CommandMapping> | null>(null);
+  const [mappingForm] = Form.useForm();
 
   useEffect(() => {
     loadConfig();
     loadAudioDevices();
     loadASRModels();
     loadLlmData();
+    loadCommandMappings();
     skinManager.initialize().then(() => { refreshSkinList(); });
     const unsubscribe = onSkinChange((skin) => { setCurrentSkinId(skin.id); });
     return () => unsubscribe();
   }, []);
+
+  // ── 指令模式数据加载 ─────────────────────────────────────────────
+
+  const loadCommandMappings = async () => {
+    try {
+      const [enabled, mappings] = await Promise.all([
+        invoke<boolean>("get_command_mode_enabled"),
+        invoke<CommandMapping[]>("get_command_mappings"),
+      ]);
+      setCommandModeEnabled(enabled);
+      setCommandMappings(mappings);
+    } catch (err) {
+      console.error("加载指令映射失败:", err);
+    }
+  };
+
+  const handleSaveMapping = async () => {
+    try {
+      const values = await mappingForm.validateFields();
+      
+      // 根据 key_code 查找对应的 key_name
+      const keyInfo = AVAILABLE_KEYS.find(k => k.code === values.key_code);
+      if (!keyInfo) {
+        message.error("无效的按键选择");
+        return;
+      }
+      
+      const mapping: CommandMapping = {
+        ...editingMapping,
+        ...values,
+        key_name: keyInfo.name,
+      } as CommandMapping;
+
+      // 校验是否与热键冲突
+      const hotkeyVk = form.getFieldValue("hotkey_vk");
+      if (mapping.key_code === hotkeyVk) {
+        message.error("模拟按键不能与热键设置冲突");
+        return;
+      }
+
+      await invoke("save_command_mapping", { mapping });
+      message.success("保存成功");
+      setMappingModalOpen(false);
+      loadCommandMappings();
+    } catch (err: any) {
+      message.error("保存失败: " + err);
+    }
+  };
+
+  const handleDeleteMapping = async (commandText: string) => {
+    try {
+      await invoke("delete_command_mapping", { commandText });
+      message.success("删除成功");
+      loadCommandMappings();
+    } catch (err) {
+      message.error("删除失败: " + err);
+    }
+  };
 
   // ── 说人话数据加载 ───────────────────────────────────────────────
 
@@ -330,397 +468,575 @@ function Settings() {
     }
   };
 
-  const handleSave = async () => {
-    setLoading(true);
+  // 自动保存单个设置项
+  const handleSettingChange = async (changedValues: any) => {
     try {
-      const values = await form.validateFields();
-      await invoke("save_config", { newConfig: values });
-      updateConfig(values);
-      message.success("设置已保存");
+      // 获取当前所有表单值
+      const currentValues = form.getFieldsValue();
+      // 合并变更
+      const newValues = { ...currentValues, ...changedValues };
+      // 保存到后端
+      await invoke("save_config", { newConfig: newValues });
+      // 更新全局状态
+      updateConfig(newValues);
     } catch (err) {
       message.error("保存失败: " + err);
-    } finally {
-      setLoading(false);
+    }
+  };
+
+  // 常规设置内容
+  const renderGeneralContent = () => (
+    <Space direction="vertical" style={{ width: "100%" }} size="large">
+      <Card>
+        <Title level={4}><SkinOutlined /> 主题皮肤</Title>
+        <Form form={form} layout="vertical" onValuesChange={handleSettingChange}>
+          <Form.Item name="skin_id" label="选择皮肤">
+            <Select style={{ width: 200 }} value={currentSkinId} onChange={handleSkinChange}>
+              {skins.map((skin) => (
+                <Select.Option key={skin.id} value={skin.id}>
+                  <Space>
+                    <span style={{ display: "inline-block", width: 16, height: 16, borderRadius: 4, background: skin.previewColor, marginRight: 8 }} />
+                    {skin.name}
+                    {skin.isBuiltIn && <Tag>内置</Tag>}
+                    {skin.isCustom && <Tag color="blue">自定义</Tag>}
+                  </Space>
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Divider />
+          <Text type="secondary">将皮肤压缩包(.zip)放入 skins 目录，系统会自动解压并加载</Text>
+        </Form>
+      </Card>
+
+      <Card>
+        <Title level={4}><RobotOutlined /> ASR 模型</Title>
+        <Form form={form} layout="vertical" onValuesChange={handleSettingChange}>
+          <Form.Item name="asr_model" label="语音识别模型">
+            <Select style={{ width: 300 }} value={currentAsrModel} onChange={handleASRModelChange} loading={switchingModel}>
+              {asrModels.map((model) => (
+                <Select.Option key={model.id} value={model.id} disabled={!model.available}>
+                  <Space>
+                    {model.name}
+                    {!model.available && <Tag color="red">未安装</Tag>}
+                    {model.id === currentAsrModel && <Tag color="green">当前</Tag>}
+                  </Space>
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Text type="secondary">选择模型后立即加载，加载完成前无法使用语音输入（可能需要数秒）</Text>
+        </Form>
+      </Card>
+
+      <Card>
+        <Title level={4}><KeyOutlined /> 热键设置</Title>
+        <Form form={form} layout="vertical" initialValues={config} onValuesChange={handleSettingChange}>
+          <Form.Item name="hotkey_vk" label="语音输入热键" rules={[{ required: true }]}>
+            <Select style={{ width: 200 }}>
+              {HOTKEY_OPTIONS.map((opt) => (<Option key={opt.value} value={opt.value}>{opt.label}</Option>))}
+            </Select>
+          </Form.Item>
+          <Text type="secondary">长按热键开始录音，松手结束；短按切换自由说话模式</Text>
+        </Form>
+      </Card>
+
+      <Card>
+        <Title level={4}><AudioOutlined /> 音频设置</Title>
+        <Form form={form} layout="vertical" onValuesChange={handleSettingChange}>
+          <Form.Item name="audio_device" label="麦克风设备">
+            <Select style={{ width: 300 }} placeholder="使用默认设备" allowClear
+              dropdownRender={(menu) => (
+                <>{menu}<div style={{ padding: "4px 8px", borderTop: "1px solid #f0f0f0" }}>
+                  <Button type="link" icon={<ReloadOutlined />} size="small" onClick={loadAudioDevices}>刷新设备列表</Button>
+                </div></>
+              )}>
+              {audioDevices.map((device) => (<Option key={device} value={device}>{device}</Option>))}
+            </Select>
+          </Form.Item>
+          <Form.Item name="silence_timeout_ms" label="静音自动停止 (毫秒)">
+            <InputNumber min={1000} max={10000} step={500} />
+          </Form.Item>
+          <Form.Item name="vad_threshold" label="语音检测阈值">
+            <InputNumber min={0.001} max={0.5} step={0.001} />
+          </Form.Item>
+          <Text type="secondary">数值越小越容易检测到语音（默认 0.005）</Text>
+        </Form>
+      </Card>
+
+      <Card>
+        <Title level={4}><ThunderboltOutlined /> 识别设置</Title>
+        <Form form={form} layout="vertical" onValuesChange={handleSettingChange}>
+          <Form.Item name="use_gpu" valuePropName="checked"><Switch checkedChildren="GPU" unCheckedChildren="CPU" /></Form.Item>
+          <Text type="secondary">优先使用 DirectML GPU 加速，不可用时自动回退到 CPU（重启后生效）</Text>
+          <Divider />
+          <Form.Item name="remove_fillers" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">自动去除"嗯、啊、呃"等语气词</Text>
+          <Form.Item name="capitalize_sentences" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">句首字母大写</Text>
+          <Form.Item name="optimize_spacing" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">在中英文之间自动添加空格</Text>
+          <Form.Item name="restore_clipboard" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">粘贴后恢复原始剪贴板内容</Text>
+          <Form.Item name="sound_feedback" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">启用音效反馈</Text>
+          <Form.Item name="auto_start" valuePropName="checked"><Switch /></Form.Item>
+          <Text type="secondary">开机自动启动</Text>
+        </Form>
+      </Card>
+    </Space>
+  );
+
+  // 指令模式内容
+  const renderCommandContent = () => (
+    <Space direction="vertical" style={{ width: "100%" }} size="large">
+              {/* 功能开关 */}
+              <Card>
+                <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
+                  <div>
+                    <Title level={4} style={{ margin: 0 }}><MacCommandOutlined /> 指令模式</Title>
+                    <Text type="secondary">开启后，说出指令文字将触发对应按键而非输入文字</Text>
+                  </div>
+                  <Switch
+                    checked={commandModeEnabled}
+                    onChange={async (checked) => {
+                      try {
+                        await invoke("set_command_mode_enabled", { enabled: checked });
+                        setCommandModeEnabled(checked);
+                        message.success(checked ? "指令模式已开启" : "指令模式已关闭");
+                      } catch (err: any) {
+                        message.error("设置失败: " + err);
+                      }
+                    }}
+                    checkedChildren="已开启"
+                    unCheckedChildren="已关闭"
+                  />
+                </Space>
+              </Card>
+
+              {/* 指令映射配置 */}
+              <Card
+                title={<span><KeyOutlined /> 指令映射配置</span>}
+                extra={
+                  commandModeEnabled && (
+                    <Button 
+                      type="primary" 
+                      icon={<PlusOutlined />}
+                      onClick={() => {
+                        setEditingMapping({});
+                        mappingForm.resetFields();
+                        setMappingModalOpen(true);
+                      }}
+                    >
+                      添加映射
+                    </Button>
+                  )
+                }
+              >
+                {!commandModeEnabled && (
+                  <Text type="secondary">请先开启指令模式开关</Text>
+                )}
+                
+                {commandModeEnabled && (
+                  <>
+                    {commandMappings.length === 0 ? (
+                      <Text type="secondary">还没有配置任何指令映射，点击右上角添加</Text>
+                    ) : (
+                      <List
+                        dataSource={commandMappings}
+                        renderItem={(item) => (
+                          <List.Item
+                            style={{
+                              borderBottom: "1px solid #f0f0f0",
+                              padding: "12px 0",
+                            }}
+                            actions={[
+                              <Button 
+                                size="small" 
+                                icon={<EditOutlined />}
+                                onClick={() => {
+                                  setEditingMapping(item);
+                                  mappingForm.setFieldsValue(item);
+                                  setMappingModalOpen(true);
+                                }}
+                              >
+                                编辑
+                              </Button>,
+                              <Button 
+                                size="small" 
+                                danger 
+                                icon={<DeleteOutlined />}
+                                onClick={() => handleDeleteMapping(item.command_text)}
+                              >
+                                删除
+                              </Button>,
+                            ]}
+                          >
+                            <List.Item.Meta
+                              title={
+                                <Space size="large">
+                                  <Tag color="blue" style={{ fontSize: 14, padding: "4px 12px" }}>
+                                    {item.command_text}
+                                  </Tag>
+                                  <Text type="secondary">→</Text>
+                                  <Tag color="green" style={{ fontSize: 14, padding: "4px 12px" }}>
+                                    {item.modifier !== "None" ? `${item.modifier} + ` : ""}{item.key_name}
+                                  </Tag>
+                                </Space>
+                              }
+                              description={
+                                <Text type="secondary" style={{ marginTop: 4, display: "block" }}>
+                                  说出"{item.command_text}"将模拟按下 
+                                  {item.modifier !== "None" ? `${item.modifier} + ` : ""}{item.key_name} 键
+                                </Text>
+                              }
+                            />
+                          </List.Item>
+                        )}
+                      />
+                    )}
+                    
+                    <Divider />
+                    
+                    <div style={{ background: "#f6ffed", border: "1px solid #b7eb8f", borderRadius: 4, padding: 12 }}>
+                      <Text style={{ color: "#52c41a" }}>💡 使用提示</Text>
+                      <ul style={{ margin: "8px 0 0 0", paddingLeft: 20, color: "#666" }}>
+                        <li>指令文字必须是一次语音识别的完整结果才会触发</li>
+                        <li>如果一段语音中只包含部分指令文字，不会触发指令</li>
+                        <li>模拟按键不能与热键设置冲突</li>
+                        <li>触发指令时不会进行 LLM 润色，也不会输出文字到光标位置</li>
+                      </ul>
+                    </div>
+                  </>
+                )}
+              </Card>
+            </Space>
+          );
+
+  // 说人话内容
+  const renderLlmContent = () => (
+    <Space direction="vertical" style={{ width: "100%" }} size="large">
+      {/* 说人话功能状态提示 */}
+      {(() => {
+        const enabled = llmConfig.llm_enabled;
+        const hasProvider = !!llmConfig.llm_provider_id;
+        const currentProvider = providers.find(p => p.id === llmConfig.llm_provider_id);
+        const currentPersona = personas.find(p => p.id === llmConfig.persona_id);
+
+        if (!enabled) return null;
+
+        if (!hasProvider) {
+          return (
+            <Card size="small" style={{ background: "#fff7e6", border: "1px solid #ffd591" }}>
+              <Space>
+                <Text style={{ color: "#fa8c16" }}>⚠️</Text>
+                <Text>请在下方点击选中一个 LLM 提供方，否则说人话功能不生效</Text>
+              </Space>
+            </Card>
+          );
+        }
+
+        return (
+          <Card size="small" style={{ background: "#f6ffed", border: "1px solid #b7eb8f" }}>
+            <Space style={{ width: "100%", justifyContent: "space-between" }}>
+              <Space wrap>
+                <Text style={{ color: "#52c41a" }}>✅</Text>
+                <Text>当前使用：</Text>
+                <Text strong>{currentProvider?.name ?? llmConfig.llm_provider_id}</Text>
+                <Text type="secondary">({currentProvider?.model_name})</Text>
+                <Text type="secondary">· 人设：</Text>
+                <Text strong>{currentPersona?.name ?? llmConfig.persona_id}</Text>
+              </Space>
+              <Button size="small" onClick={loadLlmData}>刷新</Button>
+            </Space>
+          </Card>
+        );
+      })()}
+
+      {/* 功能开关 */}
+      <Card>
+        <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
+          <div>
+            <Title level={4} style={{ margin: 0 }}><MessageOutlined /> 说人话功能</Title>
+            <Text type="secondary">语音识别结果经 LLM 润色后输出，支持本地 Ollama、vLLM 及云端 API</Text>
+          </div>
+          <Switch
+            checked={llmConfig.llm_enabled}
+            onChange={handleLlmEnabledChange}
+            disabled={providers.length === 0}
+            checkedChildren="已开启"
+            unCheckedChildren="已关闭"
+          />
+        </Space>
+        {providers.length === 0 && (
+          <Text type="warning" style={{ display: "block", marginTop: 8 }}>请先配置 LLM 提供方</Text>
+        )}
+      </Card>
+
+      {/* 人设选择 */}
+      <Card>
+        <Title level={4}>人设选择</Title>
+        <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>当前人设决定 LLM 如何润色你的语音识别结果</Text>
+        <List
+          dataSource={personas}
+          grid={{ gutter: 8, column: 2 }}
+          renderItem={(p) => (
+            <List.Item style={{ marginBottom: 0 }}>
+              <Card
+                size="small"
+                style={{
+                  cursor: "pointer",
+                  borderColor: llmConfig.persona_id === p.id ? "#1677ff" : undefined,
+                  background: llmConfig.persona_id === p.id ? "#e6f4ff" : undefined,
+                  position: "relative",
+                }}
+                styles={{ body: { padding: "10px 12px" } }}
+                onClick={() => handlePersonaSelect(p.id)}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <Space align="start" style={{ flex: 1, minWidth: 0 }}>
+                    {llmConfig.persona_id === p.id && <CheckCircleOutlined style={{ color: "#1677ff", marginTop: 3, flexShrink: 0 }} />}
+                    <div style={{ minWidth: 0 }}>
+                      <div><b>{p.name}</b> {p.is_builtin && <Tag style={{ marginLeft: 4 }}>内置</Tag>}</div>
+                      {p.description && <Text type="secondary" style={{ fontSize: 12 }}>{p.description}</Text>}
+                    </div>
+                  </Space>
+                  <Space size={4} onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0, marginLeft: 8 }}>
+                    <Tooltip title="查看提示词">
+                      <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => { setViewingPersona(p); setViewPersonaOpen(true); }} />
+                    </Tooltip>
+                    {!p.is_builtin && (
+                      <>
+                        <Tooltip title="编辑">
+                          <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditPersona(p)} />
+                        </Tooltip>
+                        <Tooltip title="删除">
+                          <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeletePersona(p.id)} />
+                        </Tooltip>
+                      </>
+                    )}
+                  </Space>
+                </div>
+              </Card>
+            </List.Item>
+          )}
+        />
+        <Button icon={<PlusOutlined />} onClick={openNewPersona} style={{ marginTop: 8 }}>新增自定义人设</Button>
+      </Card>
+
+      {/* LLM Provider 配置 */}
+      <Card
+        title={<span><ApiOutlined /> LLM 提供方</span>}
+        extra={
+          <Select placeholder="新建 Provider" style={{ width: 180 }} onChange={openNewProvider} value={null}>
+            <Option value="openai_compatible">☁️ OpenAI 兼容</Option>
+            <Option value="ollama">🏠 Ollama (本地)</Option>
+            <Option value="vllm">⚡ vLLM (本地/服务器)</Option>
+          </Select>
+        }
+      >
+        {providers.length === 0 && (
+          <Text type="secondary">还没有配置任何 LLM 提供方，点击右上角新建</Text>
+        )}
+        <List
+          dataSource={providers}
+          renderItem={(pv) => (
+            <List.Item
+              style={{
+                cursor: "pointer",
+                background: llmConfig.llm_provider_id === pv.id ? "#e6f4ff" : undefined,
+                borderLeft: llmConfig.llm_provider_id === pv.id ? "3px solid #1677ff" : "3px solid transparent",
+                paddingLeft: 8,
+                borderRadius: 4,
+              }}
+              onClick={() => handleProviderSelect(pv.id)}
+              actions={[
+                <Button
+                  size="small"
+                  loading={testingProvider === pv.id}
+                  onClick={(e) => { e.stopPropagation(); handleTestProvider(pv); }}
+                >测试连接</Button>,
+                <Button size="small" icon={<EditOutlined />} onClick={(e) => { e.stopPropagation(); openEditProvider(pv); }} />,
+                <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); handleDeleteProvider(pv.id); }} />,
+              ]}
+            >
+              <List.Item.Meta
+                title={
+                  <Space>
+                    <Badge status={llmConfig.llm_provider_id === pv.id ? "processing" : "default"} />
+                    <span>{pv.name}</span>
+                    {llmConfig.llm_provider_id === pv.id && <Tag color="blue">使用中</Tag>}
+                    <Tag>{pv.provider_type}</Tag>
+                  </Space>
+                }
+                description={<Text type="secondary">{pv.api_base_url} · {pv.model_name}</Text>}
+              />
+            </List.Item>
+          )}
+        />
+      </Card>
+    </Space>
+  );
+
+  // 根据 activeTab 渲染对应内容
+  const renderContent = () => {
+    switch (activeTab) {
+      case "general":
+        return renderGeneralContent();
+      case "command":
+        return renderCommandContent();
+      case "llm":
+        return renderLlmContent();
+      default:
+        return renderGeneralContent();
     }
   };
 
   return (
     <>
-    <Tabs
-      defaultActiveKey="general"
-      items={[
-        {
-          key: "general",
-          label: <span><ThunderboltOutlined /> 常规设置</span>,
-          children: (
-            <Space direction="vertical" style={{ width: "100%" }} size="large">
-              <Card>
-                <Title level={4}><SkinOutlined /> 主题皮肤</Title>
-                <Form form={form} layout="vertical">
-                  <Form.Item name="skin_id" label="选择皮肤">
-                    <Select style={{ width: 200 }} value={currentSkinId} onChange={handleSkinChange}>
-                      {skins.map((skin) => (
-                        <Select.Option key={skin.id} value={skin.id}>
-                          <Space>
-                            <span style={{ display: "inline-block", width: 16, height: 16, borderRadius: 4, background: skin.previewColor, marginRight: 8 }} />
-                            {skin.name}
-                            {skin.isBuiltIn && <Tag>内置</Tag>}
-                            {skin.isCustom && <Tag color="blue">自定义</Tag>}
-                          </Space>
-                        </Select.Option>
-                      ))}
-                    </Select>
-                  </Form.Item>
-                  <Divider />
-                  <Text type="secondary">将皮肤压缩包(.zip)放入 skins 目录，系统会自动解压并加载</Text>
-                </Form>
-              </Card>
-
-              <Card>
-                <Title level={4}><RobotOutlined /> ASR 模型</Title>
-                <Form form={form} layout="vertical">
-                  <Form.Item name="asr_model" label="语音识别模型">
-                    <Select style={{ width: 300 }} value={currentAsrModel} onChange={handleASRModelChange} loading={switchingModel}>
-                      {asrModels.map((model) => (
-                        <Select.Option key={model.id} value={model.id} disabled={!model.available}>
-                          <Space>
-                            {model.name}
-                            {!model.available && <Tag color="red">未安装</Tag>}
-                            {model.id === currentAsrModel && <Tag color="green">当前</Tag>}
-                          </Space>
-                        </Select.Option>
-                      ))}
-                    </Select>
-                  </Form.Item>
-                  <Text type="secondary">选择模型后立即加载，加载完成前无法使用语音输入（可能需要数秒）</Text>
-                </Form>
-              </Card>
-
-              <Card>
-                <Title level={4}><KeyOutlined /> 热键设置</Title>
-                <Form form={form} layout="vertical" initialValues={config}>
-                  <Form.Item name="hotkey_vk" label="语音输入热键" rules={[{ required: true }]}>
-                    <Select style={{ width: 200 }}>
-                      {HOTKEY_OPTIONS.map((opt) => (<Option key={opt.value} value={opt.value}>{opt.label}</Option>))}
-                    </Select>
-                  </Form.Item>
-                  <Text type="secondary">长按热键开始录音，松手结束；短按切换自由说话模式</Text>
-                </Form>
-              </Card>
-
-              <Card>
-                <Title level={4}><AudioOutlined /> 音频设置</Title>
-                <Form form={form} layout="vertical">
-                  <Form.Item name="audio_device" label="麦克风设备">
-                    <Select style={{ width: 300 }} placeholder="使用默认设备" allowClear
-                      dropdownRender={(menu) => (
-                        <>{menu}<div style={{ padding: "4px 8px", borderTop: "1px solid #f0f0f0" }}>
-                          <Button type="link" icon={<ReloadOutlined />} size="small" onClick={loadAudioDevices}>刷新设备列表</Button>
-                        </div></>
-                      )}>
-                      {audioDevices.map((device) => (<Option key={device} value={device}>{device}</Option>))}
-                    </Select>
-                  </Form.Item>
-                  <Form.Item name="silence_timeout_ms" label="静音自动停止 (毫秒)">
-                    <InputNumber min={1000} max={10000} step={500} />
-                  </Form.Item>
-                  <Form.Item name="vad_threshold" label="语音检测阈值">
-                    <InputNumber min={0.001} max={0.5} step={0.001} />
-                  </Form.Item>
-                  <Text type="secondary">数值越小越容易检测到语音（默认 0.005）</Text>
-                </Form>
-              </Card>
-
-              <Card>
-                <Title level={4}><ThunderboltOutlined /> 识别设置</Title>
-                <Form form={form} layout="vertical">
-                  <Form.Item name="use_gpu" valuePropName="checked"><Switch checkedChildren="GPU" unCheckedChildren="CPU" /></Form.Item>
-                  <Text type="secondary">优先使用 DirectML GPU 加速，不可用时自动回退到 CPU（重启后生效）</Text>
-                  <Divider />
-                  <Form.Item name="remove_fillers" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">自动去除"嗯、啊、呃"等语气词</Text>
-                  <Form.Item name="capitalize_sentences" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">句首字母大写</Text>
-                  <Form.Item name="optimize_spacing" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">在中英文之间自动添加空格</Text>
-                  <Form.Item name="restore_clipboard" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">粘贴后恢复原始剪贴板内容</Text>
-                  <Form.Item name="sound_feedback" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">启用音效反馈</Text>
-                  <Form.Item name="auto_start" valuePropName="checked"><Switch /></Form.Item>
-                  <Text type="secondary">开机自动启动</Text>
-                </Form>
-              </Card>
-
-              <div style={{ textAlign: "center" }}>
-                <Button type="primary" icon={<SaveOutlined />} size="large" loading={loading} onClick={handleSave}>保存设置</Button>
-              </div>
-            </Space>
-          ),
-        },
-        {
-          key: "llm",
-          label: <span><MessageOutlined /> 说人话</span>,
-          children: (
-            <Space direction="vertical" style={{ width: "100%" }} size="large">
-
-              {/* 说人话功能状态提示 */}
-              {(() => {
-                const enabled = llmConfig.llm_enabled;
-                const hasProvider = !!llmConfig.llm_provider_id;
-                const currentProvider = providers.find(p => p.id === llmConfig.llm_provider_id);
-                const currentPersona = personas.find(p => p.id === llmConfig.persona_id);
-
-                if (!enabled) return null;
-
-                if (!hasProvider) {
-                  return (
-                    <Card size="small" style={{ background: "#fff7e6", border: "1px solid #ffd591" }}>
-                      <Space>
-                        <Text style={{ color: "#fa8c16" }}>⚠️</Text>
-                        <Text>请在下方点击选中一个 LLM 提供方，否则说人话功能不生效</Text>
-                      </Space>
-                    </Card>
-                  );
-                }
-
-                return (
-                  <Card size="small" style={{ background: "#f6ffed", border: "1px solid #b7eb8f" }}>
-                    <Space style={{ width: "100%", justifyContent: "space-between" }}>
-                      <Space wrap>
-                        <Text style={{ color: "#52c41a" }}>✅</Text>
-                        <Text>当前使用：</Text>
-                        <Text strong>{currentProvider?.name ?? llmConfig.llm_provider_id}</Text>
-                        <Text type="secondary">({currentProvider?.model_name})</Text>
-                        <Text type="secondary">· 人设：</Text>
-                        <Text strong>{currentPersona?.name ?? llmConfig.persona_id}</Text>
-                      </Space>
-                      <Button size="small" onClick={loadLlmData}>刷新</Button>
-                    </Space>
-                  </Card>
-                );
-              })()}
-
-              {/* 功能开关 */}
-              <Card>
-                <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
-                  <div>
-                    <Title level={4} style={{ margin: 0 }}><MessageOutlined /> 说人话功能</Title>
-                    <Text type="secondary">语音识别结果经 LLM 润色后输出，支持本地 Ollama、vLLM 及云端 API</Text>
-                  </div>
-                  <Switch
-                    checked={llmConfig.llm_enabled}
-                    onChange={handleLlmEnabledChange}
-                    disabled={providers.length === 0}
-                    checkedChildren="已开启"
-                    unCheckedChildren="已关闭"
-                  />
-                </Space>
-                {providers.length === 0 && (
-                  <Text type="warning" style={{ display: "block", marginTop: 8 }}>请先配置 LLM 提供方</Text>
-                )}
-              </Card>
-
-              {/* 人设选择 */}
-              <Card>
-                <Title level={4}>人设选择</Title>
-                <Text type="secondary" style={{ display: "block", marginBottom: 12 }}>当前人设决定 LLM 如何润色你的语音识别结果</Text>
-                <List
-                  dataSource={personas}
-                  grid={{ gutter: 8, column: 2 }}
-                  renderItem={(p) => (
-                    <List.Item style={{ marginBottom: 0 }}>
-                      <Card
-                        size="small"
-                        style={{
-                          cursor: "pointer",
-                          borderColor: llmConfig.persona_id === p.id ? "#1677ff" : undefined,
-                          background: llmConfig.persona_id === p.id ? "#e6f4ff" : undefined,
-                          position: "relative",
-                        }}
-                        styles={{ body: { padding: "10px 12px" } }}
-                        onClick={() => handlePersonaSelect(p.id)}
-                      >
-                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                          <Space align="start" style={{ flex: 1, minWidth: 0 }}>
-                            {llmConfig.persona_id === p.id && <CheckCircleOutlined style={{ color: "#1677ff", marginTop: 3, flexShrink: 0 }} />}
-                            <div style={{ minWidth: 0 }}>
-                              <div><b>{p.name}</b> {p.is_builtin && <Tag style={{ marginLeft: 4 }}>内置</Tag>}</div>
-                              {p.description && <Text type="secondary" style={{ fontSize: 12 }}>{p.description}</Text>}
-                            </div>
-                          </Space>
-                          <Space size={4} onClick={(e) => e.stopPropagation()} style={{ flexShrink: 0, marginLeft: 8 }}>
-                            <Tooltip title="查看提示词">
-                              <Button type="text" size="small" icon={<EyeOutlined />} onClick={() => { setViewingPersona(p); setViewPersonaOpen(true); }} />
-                            </Tooltip>
-                            {!p.is_builtin && (
-                              <>
-                                <Tooltip title="编辑">
-                                  <Button type="text" size="small" icon={<EditOutlined />} onClick={() => openEditPersona(p)} />
-                                </Tooltip>
-                                <Tooltip title="删除">
-                                  <Button type="text" size="small" danger icon={<DeleteOutlined />} onClick={() => handleDeletePersona(p.id)} />
-                                </Tooltip>
-                              </>
-                            )}
-                          </Space>
-                        </div>
-                      </Card>
-                    </List.Item>
-                  )}
-                />
-                <Button icon={<PlusOutlined />} onClick={openNewPersona} style={{ marginTop: 8 }}>新增自定义人设</Button>
-              </Card>
-
-              {/* LLM Provider 配置 */}
-              <Card
-                title={<span><ApiOutlined /> LLM 提供方</span>}
-                extra={
-                  <Select placeholder="新建 Provider" style={{ width: 180 }} onChange={openNewProvider} value={null}>
-                    <Option value="openai_compatible">☁️ OpenAI 兼容</Option>
-                    <Option value="ollama">🏠 Ollama (本地)</Option>
-                    <Option value="vllm">⚡ vLLM (本地/服务器)</Option>
-                  </Select>
-                }
-              >
-                {providers.length === 0 && (
-                  <Text type="secondary">还没有配置任何 LLM 提供方，点击右上角新建</Text>
-                )}
-                <List
-                  dataSource={providers}
-                  renderItem={(pv) => (
-                    <List.Item
-                      style={{
-                        cursor: "pointer",
-                        background: llmConfig.llm_provider_id === pv.id ? "#e6f4ff" : undefined,
-                        borderLeft: llmConfig.llm_provider_id === pv.id ? "3px solid #1677ff" : "3px solid transparent",
-                        paddingLeft: 8,
-                        borderRadius: 4,
-                      }}
-                      onClick={() => handleProviderSelect(pv.id)}
-                      actions={[
-                        <Button
-                          size="small"
-                          loading={testingProvider === pv.id}
-                          onClick={(e) => { e.stopPropagation(); handleTestProvider(pv); }}
-                        >测试连接</Button>,
-                        <Button size="small" icon={<EditOutlined />} onClick={(e) => { e.stopPropagation(); openEditProvider(pv); }} />,
-                        <Button size="small" danger icon={<DeleteOutlined />} onClick={(e) => { e.stopPropagation(); handleDeleteProvider(pv.id); }} />,
-                      ]}
-                    >
-                      <List.Item.Meta
-                        title={
-                          <Space>
-                            <Badge status={llmConfig.llm_provider_id === pv.id ? "processing" : "default"} />
-                            <span>{pv.name}</span>
-                            {llmConfig.llm_provider_id === pv.id && <Tag color="blue">使用中</Tag>}
-                            <Tag>{pv.provider_type}</Tag>
-                          </Space>
-                        }
-                        description={<Text type="secondary">{pv.api_base_url} · {pv.model_name}</Text>}
-                      />
-                    </List.Item>
-                  )}
-                />
-              </Card>
-            </Space>
-          ),
-        },
-      ]}
-    />
-
-    {/* 人设编辑弹窗 */}
-    <Modal
-      title={editingPersona?.is_builtin ? "预览人设" : (editingPersona?.id ? "编辑人设" : "新增人设")}
-      open={personaModalOpen}
-      onOk={editingPersona?.is_builtin ? () => setPersonaModalOpen(false) : handleSavePersona}
-      onCancel={() => setPersonaModalOpen(false)}
-      okText={editingPersona?.is_builtin ? "关闭" : "保存"}
-      cancelText="取消"
-      width={600}
-    >
-      <Form form={personaForm} layout="vertical">
-        {editingPersona?.id && (
-          <Form.Item name="id" label="ID">
-            <Input disabled />
-          </Form.Item>
-        )}
-        <Form.Item name="name" label="显示名称" rules={[{ required: true }]}>
-          <Input maxLength={20} disabled={editingPersona?.is_builtin} />
-        </Form.Item>
-        <Form.Item name="description" label="用途描述">
-          <Input maxLength={100} disabled={editingPersona?.is_builtin} />
-        </Form.Item>
-        <Form.Item name="system_prompt" label="System Prompt" rules={[{ required: true }]}>
-          <TextArea rows={6} maxLength={2000} showCount disabled={editingPersona?.is_builtin} />
-        </Form.Item>
-      </Form>
-    </Modal>
-
-    {/* 人设查看弹窗 */}
-    <Modal
-      title={viewingPersona?.name}
-      open={viewPersonaOpen}
-      onOk={() => setViewPersonaOpen(false)}
-      onCancel={() => setViewPersonaOpen(false)}
-      okText="关闭"
-      cancelButtonProps={{ style: { display: "none" } }}
-      width={600}
-    >
-      {viewingPersona && (
-        <Space direction="vertical" style={{ width: "100%" }}>
-          {viewingPersona.description && (
-            <Text type="secondary">{viewingPersona.description}</Text>
+      {renderContent()}
+      {/* 人设编辑弹窗 */}
+      <Modal
+        title={editingPersona?.is_builtin ? "预览人设" : (editingPersona?.id ? "编辑人设" : "新增人设")}
+        open={personaModalOpen}
+        onOk={editingPersona?.is_builtin ? () => setPersonaModalOpen(false) : handleSavePersona}
+        onCancel={() => setPersonaModalOpen(false)}
+        okText={editingPersona?.is_builtin ? "关闭" : "保存"}
+        cancelText="取消"
+        width={600}
+      >
+        <Form form={personaForm} layout="vertical">
+          {editingPersona?.id && (
+            <Form.Item name="id" label="ID">
+              <Input disabled />
+            </Form.Item>
           )}
-          <div style={{ marginTop: 8 }}>
-            <Text strong style={{ display: "block", marginBottom: 4 }}>System Prompt</Text>
-            <TextArea
-              value={viewingPersona.system_prompt}
-              readOnly
-              rows={10}
-              style={{ fontFamily: "monospace", fontSize: 13 }}
-            />
-          </div>
-        </Space>
-      )}
-    </Modal>
+          <Form.Item name="name" label="显示名称" rules={[{ required: true }]}>
+            <Input maxLength={20} disabled={editingPersona?.is_builtin} />
+          </Form.Item>
+          <Form.Item name="description" label="用途描述">
+            <Input maxLength={100} disabled={editingPersona?.is_builtin} />
+          </Form.Item>
+          <Form.Item name="system_prompt" label="System Prompt" rules={[{ required: true }]}>
+            <TextArea rows={6} maxLength={2000} showCount disabled={editingPersona?.is_builtin} />
+          </Form.Item>
+        </Form>
+      </Modal>
 
-    {/* Provider 编辑弹窗 */}
-    <Modal
-      title={editingProvider?.id ? "编辑 LLM Provider" : "新建 LLM Provider"}
-      open={providerModalOpen}
-      onOk={handleSaveProvider}
-      onCancel={() => setProviderModalOpen(false)}
-      okText="保存"
-      cancelText="取消"
-      width={560}
-    >
-      <Form form={providerForm} layout="vertical">
-        <Form.Item name="name" label="名称" rules={[{ required: true }]}>
-          <Input />
-        </Form.Item>
-        <Form.Item name="api_base_url" label="API 地址" rules={[{ required: true }]}>
-          <Input placeholder="https://api.openai.com/v1" />
-        </Form.Item>
-        <Form.Item name="api_key" label="API Key">
-          <Input.Password placeholder="本地服务可留空" />
-        </Form.Item>
-        <Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}>
-          <Input placeholder="gpt-4o-mini" />
-        </Form.Item>
-        <Space size="large">
-          <Form.Item name="timeout_secs" label="超时秒数">
-            <InputNumber min={5} max={300} />
+      {/* 人设查看弹窗 */}
+      <Modal
+        title={viewingPersona?.name}
+        open={viewPersonaOpen}
+        onOk={() => setViewPersonaOpen(false)}
+        onCancel={() => setViewPersonaOpen(false)}
+        okText="关闭"
+        cancelButtonProps={{ style: { display: "none" } }}
+        width={600}
+      >
+        {viewingPersona && (
+          <Space direction="vertical" style={{ width: "100%" }}>
+            {viewingPersona.description && (
+              <Text type="secondary">{viewingPersona.description}</Text>
+            )}
+            <div style={{ marginTop: 8 }}>
+              <Text strong style={{ display: "block", marginBottom: 4 }}>System Prompt</Text>
+              <TextArea
+                value={viewingPersona.system_prompt}
+                readOnly
+                rows={10}
+                style={{ fontFamily: "monospace", fontSize: 13 }}
+              />
+            </div>
+          </Space>
+        )}
+      </Modal>
+
+      {/* Provider 编辑弹窗 */}
+      <Modal
+        title={editingProvider?.id ? "编辑 LLM Provider" : "新建 LLM Provider"}
+        open={providerModalOpen}
+        onOk={handleSaveProvider}
+        onCancel={() => setProviderModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+        width={560}
+      >
+        <Form form={providerForm} layout="vertical">
+          <Form.Item name="name" label="名称" rules={[{ required: true }]}>
+            <Input />
           </Form.Item>
-          <Form.Item name="max_tokens" label="最大 Token">
-            <InputNumber min={64} max={4096} />
+          <Form.Item name="api_base_url" label="API 地址" rules={[{ required: true }]}>
+            <Input placeholder="https://api.openai.com/v1" />
           </Form.Item>
-          <Form.Item name="temperature" label="Temperature">
-            <InputNumber min={0} max={2} step={0.1} />
+          <Form.Item name="api_key" label="API Key">
+            <Input.Password placeholder="本地服务可留空" />
           </Form.Item>
-        </Space>
-      </Form>
-    </Modal>
+          <Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}>
+            <Input placeholder="gpt-4o-mini" />
+          </Form.Item>
+          <Space size="large">
+            <Form.Item name="timeout_secs" label="超时秒数">
+              <InputNumber min={5} max={300} />
+            </Form.Item>
+            <Form.Item name="max_tokens" label="最大 Token">
+              <InputNumber min={64} max={4096} />
+            </Form.Item>
+            <Form.Item name="temperature" label="Temperature">
+              <InputNumber min={0} max={2} step={0.1} />
+            </Form.Item>
+          </Space>
+        </Form>
+      </Modal>
+
+      {/* 指令映射编辑弹窗 */}
+      <Modal
+        title={editingMapping?.command_text ? "编辑指令映射" : "添加指令映射"}
+        open={mappingModalOpen}
+        onOk={handleSaveMapping}
+        onCancel={() => setMappingModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Form form={mappingForm} layout="vertical">
+          <Form.Item 
+            name="command_text" 
+            label="指令文字"
+            rules={[
+              { required: true, message: "请输入指令文字" },
+              { max: 10, message: "最多10个字符" },
+              { pattern: /^[\u4e00-\u9fa5a-zA-Z0-9]+$/, message: "仅支持中文、英文、数字" },
+            ]}
+          >
+            <Input placeholder="如：发送" disabled={!!editingMapping?.command_text} />
+          </Form.Item>
+          <Form.Item 
+            name="modifier" 
+            label="修饰键"
+            initialValue="None"
+          >
+            <Select style={{ width: 120 }}>
+              {MODIFIER_KEYS.map((mod) => (
+                <Select.Option key={mod.value} value={mod.value}>
+                  {mod.label}
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Form.Item 
+            name="key_code" 
+            label="按键"
+            rules={[{ required: true, message: "请选择按键" }]}
+          >
+            <Select placeholder="选择按键" style={{ width: 150 }}>
+              {AVAILABLE_KEYS.map((key) => (
+                <Select.Option key={key.code} value={key.code}>
+                  {key.name}
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
     </>
   );
 }
