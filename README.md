@@ -50,14 +50,75 @@
 - **系统托盘**：最小化到托盘，通过托盘菜单快速操作
 - **悬浮窗**：可拖拽的悬浮指示器，显示录音状态
 
+### 🗣️ 说人话（LLM 润色）
+- **LLM 接入**：支持本地 Ollama、vLLM 及 OpenAI 兼容云端 API
+- **人设驱动润色**：语音识别原文经 LLM 按选定人设风格重写后再输出
+- **7 套内置人设**：正式书面、简洁精炼、口语自然、逻辑严谨、创意文案、中译英、英译中
+- **自定义人设**：支持自定义 System Prompt，ID 自动生成
+- **润色状态反馈**：悬浮框实时显示"润色中 Xs"计秒，失败自动降级输出原文
+- **思考过程过滤**：自动去除 `<think>` 标签内容，只输出最终结果
+
 ## 🚀 快速开始
 
-### 环境要求
+### 🖥️ 直接使用（Release 版）
+
+1. 从 [Releases](https://github.com/yourusername/SpeakPlain/releases) 下载最新的 `SpeakPlain-vX.X.X-Windows-x64.zip`
+2. 解压到任意目录
+3. **下载 ASR 模型**（见下方说明），放入 `models/` 目录
+4. 双击 `speakplain.exe` 启动
+
+#### ASR 模型下载
+
+| 模型 | 精度 | 大小 | 目录结构 | 下载地址 |
+|------|------|------|----------|----------|
+| SenseVoice（默认） | 标准 | ~400MB | `models/sensevoice/model.onnx` | [HuggingFace](https://huggingface.co/FunAudioLLM/SenseVoiceSmall) |
+| Qwen3-ASR-0.6B（推荐） | 更高 | ~1.5GB | `models/Qwen3-ASR-0.6B-ONNX-CPU/onnx_models/...` | [HuggingFace](https://huggingface.co/Qwen/Qwen3-ASR) |
+
+**方式一：使用下载脚本（需要 Python）**
+
+```bash
+# 下载 SenseVoice 模型
+python scripts/download_model.py
+
+# 下载 Qwen3-ASR-0.6B 模型（推荐，精度更高）
+python scripts/download_qwen3_full.py
+# 或使用一键脚本（Windows）
+scripts/download_qwen3_full.bat
+```
+
+**方式二：手动下载**
+
+SenseVoice：
+1. 前往 [HuggingFace SenseVoiceSmall](https://huggingface.co/FunAudioLLM/SenseVoiceSmall)
+2. 下载 `model.onnx`，放到 `models/sensevoice/model.onnx`
+
+Qwen3-ASR-0.6B（需要全套 ONNX 文件）：
+1. 前往 [HuggingFace Qwen3-ASR](https://huggingface.co/Qwen/Qwen3-ASR)（或使用 ModelScope 镜像）
+2. 将模型文件放到以下结构：
+```
+models/
+└── Qwen3-ASR-0.6B-ONNX-CPU/
+    ├── onnx_models/
+    │   ├── encoder_conv.onnx
+    │   ├── encoder_transformer.onnx
+    │   ├── decoder_init.int8.onnx
+    │   ├── decoder_step.int8.onnx
+    │   └── embed_tokens.bin
+    └── tokenizer.json
+```
+
+> 国内用户推荐使用 [ModelScope 镜像](https://modelscope.cn) 下载，速度更快。
+
+---
+
+### 👨‍💻 开发环境搭建
+
+#### 环境要求
 - Windows 10/11
 - [Node.js](https://nodejs.org/) 18+
 - [Rust](https://www.rust-lang.org/tools/install) 1.70+
 
-### 安装依赖
+#### 安装依赖
 
 ```bash
 # 克隆项目
@@ -72,7 +133,7 @@ npm install
 cd ..
 ```
 
-### 下载模型
+#### 下载模型
 
 ```bash
 # 下载 SenseVoice 模型（默认）
@@ -86,14 +147,14 @@ scripts/download_qwen3_asr.bat
 
 > 模型文件放置在 `speakplain/models/` 目录下，应用启动时自动识别。
 
-### 开发运行
+#### 开发运行
 
 ```bash
 cd speakplain
 npm run tauri dev
 ```
 
-### 构建发布
+#### 构建发布
 
 ```bash
 cd speakplain
@@ -184,6 +245,40 @@ SpeakPlain/
 - **去除语气词**：自动过滤"嗯、啊、呃"等填充词
 - **句首大写**：自动将句子首字母大写
 
+### 说人话设置
+
+#### 第一步：配置 LLM 提供方
+
+在设置 → 说人话 → LLM 提供方中新建一个提供方：
+
+| 类型 | 适用场景 | 示例地址 |
+|------|----------|----------|
+| Ollama（本地） | 本地运行大模型 | `http://localhost:11434` |
+| vLLM（本地/服务器） | 高性能推理服务 | `http://localhost:8000` |
+| OpenAI 兼容 | 云端 API（OpenAI、DeepSeek 等） | `https://api.openai.com` |
+
+配置完成后点击**测试连接**确认可用，再点击该行**选中**为当前使用的提供方。
+
+#### 第二步：选择人设
+
+| 人设 | 适用场景 | 效果示例 |
+|------|----------|----------|
+| **正式书面** | 工作邮件、汇报、公文 | 口语 → 规范书面语 |
+| **简洁精炼** | 备忘录、清单、摘要 | 冗余表达 → 精炼要点 |
+| **口语自然** | 聊天、日常沟通 | 去除停顿词，语句更流畅 |
+| **逻辑严谨** | 技术文档、分析报告 | 重新组织为条理清晰的结构 |
+| **创意文案** | 营销、推广、故事 | 改写为生动有感染力的文字 |
+| **中译英** | 中文输入 → 英文输出 | 语音说中文，输出英文翻译 |
+| **英译中** | 英文输入 → 中文输出 | 语音说英文，输出中文翻译 |
+
+也可在人设列表底部新建**自定义人设**，填写名称和 System Prompt 即可。
+
+#### 第三步：开启功能
+
+打开**说人话功能**开关，之后每次语音识别完成后都会自动调用 LLM 进行润色，悬浮框会显示"润色中 Xs"，完成后将润色结果粘贴到当前输入框。
+
+> 润色失败时（如网络错误、模型不可用）自动降级，直接粘贴原始识别文字，不影响正常使用。
+
 ## 🛡️ 隐私说明
 
 - 所有语音识别均在本地完成，不会上传音频到云端
@@ -222,13 +317,22 @@ SpeakPlain/
 - [x] 识别等待 UI 优化：波形冻结 + 呼吸动画 + 底部扫光进度条
 - [x] 识别等待实时计秒显示
 
-### 🚧 第三阶段：大语言模型人设（进行中）
-- [ ] 本地大语言模型集成
-- [ ] 智能文本润色与纠错
-- [ ] 多场景人设切换（正式/ casual /创意等）
-- [ ] 自定义提示词模板
+### ✅ 第三阶段：大语言模型人设（已完成）
+- [x] 本地/云端 LLM 集成（Ollama、vLLM、OpenAI 兼容接口）
+- [x] 智能文本润色——识别结果经 LLM 按人设风格重写后再输出
+- [x] 多场景人设切换：内置翻译、会议记录、播音员等人设
+- [x] 自定义人设（自定义 System Prompt，ID 自动生成）
+- [x] 人设提示词查看（内置只读，自定义可编辑）
+- [x] 润色状态实时显示（悬浮框"润色中 Xs"计秒反馈）
+- [x] `<think>` 思考过程自动过滤，只输出最终结果
+- [x] 润色失败自动降级输出原始识别文字
 - [ ] 上下文记忆功能
 - [ ] 流式生成响应
+
+### 🔜 第四阶段：无线电语音输入（敬请期待）
+- [ ] 通过无线电频进行语音输入
+- [ ] 后台设置调频功能
+- [ ] 支持多频点切换
 
 ## 🙏 致谢
 
