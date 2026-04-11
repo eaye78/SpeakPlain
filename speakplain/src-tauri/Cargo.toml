@@ -1,6 +1,6 @@
 [package]
 name = "speakplain"
-version = "0.1.0"
+version = "0.2.5"
 description = "说人话 - AI语音输入法"
 authors = ["SpeakPlain Team"]
 license = "MIT"
