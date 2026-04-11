@@ -14,7 +14,9 @@ const BAR_COUNT = 40;
 function Indicator() {
   const [status, setStatus] = useState<string>("idle");
   const [elapsed, setElapsed] = useState(0);
+  const [procElapsed, setProcElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const procTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   // Web Audio API refs
@@ -31,6 +33,15 @@ function Indicator() {
   };
   const stopTimer = () => {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+  };
+
+  const startProcTimer = () => {
+    setProcElapsed(0);
+    if (procTimerRef.current) clearInterval(procTimerRef.current);
+    procTimerRef.current = setInterval(() => setProcElapsed(s => s + 1), 1000);
+  };
+  const stopProcTimer = () => {
+    if (procTimerRef.current) { clearInterval(procTimerRef.current); procTimerRef.current = null; }
   };
 
   // 波形绘制
@@ -174,10 +185,18 @@ function Indicator() {
         stopTimer();
         stopWaveform();
       }
+
+      // processing 状态启动计时
+      if (newStatus === "processing") {
+        startProcTimer();
+      } else {
+        stopProcTimer();
+      }
     });
 
     return () => {
       stopTimer();
+      stopProcTimer();
       stopWaveform();
       unlistenStatus.then((f) => f());
       unlistenSkin.then((f) => f());
@@ -198,7 +217,7 @@ function Indicator() {
   const timerDisplay = `${String(hh).padStart(2,"0")}:${String(mm).padStart(2,"0")}:${String(ss).padStart(2,"0")}`;
 
   const stateLabel = isLoading ? "模型加载中..."
-    : isProcessing ? "识别中..."
+    : isProcessing ? `识别中 ${procElapsed > 0 ? procElapsed + "s" : ""}`
     : isDone ? "识别完成"
     : isError ? (status === "no_voice" ? "未检测到语音" : status === "cancelled" ? "已取消" : "识别出错")
     : null;
@@ -213,12 +232,19 @@ function Indicator() {
 
       {/* 中间：波形 Canvas */}
       <div className="ind-waveform">
-        <canvas ref={canvasRef} className={`ind-wave-canvas${showAsRecording ? "" : " ind-wave-canvas--idle"}`} />
+        <canvas
+          ref={canvasRef}
+          className={`ind-wave-canvas${
+            showAsRecording ? "" :
+            isProcessing    ? " ind-wave-canvas--processing" :
+            " ind-wave-canvas--idle"
+          }`}
+        />
         {isProcessing && (
-          <div className="ind-proc-dots">
-            {Array.from({ length: 7 }).map((_, i) => (
-              <div key={i} className="ind-proc-dot" style={{ animationDelay: `${i * 0.1}s` }} />
-            ))}
+          <div className="ind-proc-bar">
+            <div className="ind-proc-track">
+              <div className="ind-proc-fill" />
+            </div>
           </div>
         )}
       </div>

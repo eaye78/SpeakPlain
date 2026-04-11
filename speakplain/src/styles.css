@@ -145,30 +145,50 @@ body.indicator-page.has-bg-image #root {
   opacity: 0.4;
 }
 
-/* 识别中跳动点容器，叠在 canvas 上方 */
-.ind-proc-dots {
+/* 识别中：保留波形帧，加一个呼吸暗淡效果 */
+.ind-wave-canvas--processing {
+  opacity: 0.55;
+  animation: ind-wave-breathe 1.6s ease-in-out infinite;
+}
+
+@keyframes ind-wave-breathe {
+  0%, 100% { opacity: 0.55; }
+  50%       { opacity: 0.25; }
+}
+
+/* 识别中：透明叠加层，不遮挡波形 */
+.ind-proc-bar {
   position: absolute;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
   inset: 0;
-  background: rgba(232,236,243,0.85);
+  pointer-events: none;
 }
 
-/* 识别中跳动点 */
-.ind-proc-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--skin-processing-dot);
-  animation: ind-dot-bounce 0.7s ease-in-out infinite;
-  opacity: 0.8;
+/* 扫光轨道：贴底部，极细 */
+.ind-proc-track {
+  position: absolute;
+  bottom: 6px;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: rgba(59,107,235,0.12);
+  overflow: hidden;
 }
 
-@keyframes ind-dot-bounce {
-  0%, 80%, 100% { transform: translateY(0); opacity: 0.4; }
-  40%           { transform: translateY(-6px); opacity: 1; }
+/* 扫光滑块 */
+.ind-proc-fill {
+  height: 100%;
+  width: 40%;
+  border-radius: 1px;
+  background: linear-gradient(90deg, transparent, var(--skin-processing-dot), transparent);
+  animation: ind-shimmer 1.6s ease-in-out infinite;
+  position: absolute;
+  left: -40%;
+}
+
+@keyframes ind-shimmer {
+  0%   { left: -40%; }
+  100% { left: 120%; }
 }
 
 /* 右侧拖拽区域 */

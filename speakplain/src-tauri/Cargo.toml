@@ -25,7 +25,8 @@ cpal = "0.15"
 rubato = "0.14"
 
 # ONNX Runtime - 静态链接，无需外部 onnxruntime.dll
-ort = { version = "2.0.0-rc.12" }
+# 启用 DirectML feature 以支持 GPU 加速
+ort = { version = "2.0.0-rc.12", features = ["directml"] }
 dirs = "5"
 
 # Database
@@ -52,6 +53,12 @@ once_cell = "1.19"
 parking_lot = "0.12"
 zip = "2.2"
 base64 = "0.22"
+
+# Audio processing
+realfft = "3"
+mel_filter = "0.1"
+
+
 
 [package.metadata]
 

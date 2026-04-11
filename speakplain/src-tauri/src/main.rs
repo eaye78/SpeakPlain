@@ -6,6 +6,8 @@ mod hotkey;
 mod input;
 mod storage;
 mod asr;
+mod asr_sensevoice;
+mod asr_qwen3asr;
 mod indicator;
 mod config;
 mod tray;
@@ -16,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Listener, Manager, State};
 use log::info;
+use asr::{ASREngine, ASRModelType};
 
 /// 静音自动停止阈值 (RMS)
 const SILENCE_THRESHOLD: f32 = 0.05;
@@ -30,7 +33,7 @@ pub struct AppState {
     pub hotkey_manager: Arc<Mutex<hotkey::HotkeyManager>>,
     pub input_paster: Arc<Mutex<input::TextPaster>>,
     pub storage: Arc<Mutex<storage::Storage>>,
-    pub asr_engine: Arc<Mutex<Option<asr::SenseVoiceEngine>>>,
+    pub asr_engine: Arc<Mutex<Option<ASREngine>>>,
     pub indicator: Arc<Mutex<indicator::IndicatorWindow>>,
     pub config: Arc<Mutex<config::AppConfig>>,
     /// 当前是否处于自由说话模式
@@ -130,14 +133,26 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
         let vad_threshold = state.config.lock().vad_threshold;
         let rms = audio::AudioRecorder::calculate_rms(&audio_data);
         info!("VAD 检测: 样本数={}, RMS={:.6}, 阈值={:.6}", audio_data.len(), rms, vad_threshold);
-        // 如果数据根本为空（样本数=0）则跳过
+        
+        // 检查音频数据是否有效
         if audio_data.is_empty() {
-            info!("无鼿音活动（样本数为0），跳过识别");
+            info!("无语音活动（样本数为0），跳过识别");
             let indicator = state.indicator.lock();
             indicator.set_no_voice();
             indicator.hide_delayed(1500);
             return;
         }
+        
+        // 检查是否有语音活动（RMS 超过阈值）
+        if rms < vad_threshold {
+            info!("无语音活动（RMS {:.6} < 阈值 {:.6}），跳过识别", rms, vad_threshold);
+            let indicator = state.indicator.lock();
+            indicator.set_no_voice();
+            indicator.hide_delayed(1500);
+            return;
+        }
+        
+        info!("检测到语音活动，开始识别...");
 
         // 设置识别中状态
         state.indicator.lock().set_processing();
@@ -162,9 +177,17 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
 
             match tokio::task::spawn_blocking(move || {
                 let engine = engine_arc.lock();
-                match *engine {
-                    Some(ref e) => e.recognize(&audio_clone),
-                    None => Err(anyhow::anyhow!("引擎未初始化")),
+                match engine.as_ref() {
+                    Some(e) => {
+                        info!("调用 recognize，样本数: {}", audio_clone.len());
+                        let result = e.recognize(&audio_clone);
+                        info!("recognize 返回: {:?}", result);
+                        result
+                    }
+                    None => {
+                        log::error!("ASR 引擎未初始化");
+                        Err(anyhow::anyhow!("引擎未初始化"))
+                    }
                 }
             }).await {
                 Ok(Ok(t)) => t,
@@ -417,7 +440,6 @@ async fn save_skin_id(state: State<'_, AppState>, skin_id: String) -> Result<(),
 #[tauri::command]
 async fn scan_skin_folders(app_handle: AppHandle) -> Result<Vec<String>, String> {
     use std::fs;
-    use std::path::Path;
     
     // 获取资源目录
     let resource_dir = app_handle.path().resource_dir()
@@ -550,11 +572,72 @@ async fn save_config(state: State<'_, AppState>, mut new_config: config::AppConf
 #[tauri::command]
 async fn init_asr_engine(state: State<'_, AppState>) -> Result<String, String> {
     info!("手动重新初始化ASR引擎");
-    let engine = asr::SenseVoiceEngine::new()
-        .map_err(|e| format!("初始化失败: {}", e))?;
-    let hw_info = engine.hardware_info().to_string();
-    *state.asr_engine.lock() = Some(engine);
+    let model_type = state.config.lock().asr_model.parse::<ASRModelType>()
+        .map_err(|e| format!("无效的模型类型: {}", e))?;
+    let engine_arc = state.asr_engine.clone();
+    let hw_info = tokio::task::spawn_blocking(move || {
+        let engine = ASREngine::new(model_type)
+            .map_err(|e| format!("初始化失败: {}", e))?;
+        let hw_info = engine.hardware_info();
+        *engine_arc.lock() = Some(engine);
+        Ok::<String, String>(hw_info)
+    }).await.map_err(|e| format!("任务执行失败: {}", e))??;
     Ok(hw_info)
+}
+
+/// 获取可用的 ASR 模型列表
+#[tauri::command]
+async fn get_available_asr_models() -> Result<Vec<(String, String, bool)>, String> {
+    let models = asr::get_available_models();
+    Ok(models.into_iter()
+        .map(|(t, name, available)| (t.to_string(), name, available))
+        .collect())
+}
+
+/// 切换 ASR 模型
+#[tauri::command]
+async fn switch_asr_model(state: State<'_, AppState>, model_type: String) -> Result<String, String> {
+    info!("切换 ASR 模型到: {}", model_type);
+    
+    let model_type = model_type.parse::<ASRModelType>()
+        .map_err(|e| format!("无效的模型类型: {}", e))?;
+    
+    // 先释放当前引擎
+    {
+        let mut engine = state.asr_engine.lock();
+        *engine = None;
+    }
+
+    // 在独立线程中加载模型（避免阻塞异步运行时）
+    let engine_arc = state.asr_engine.clone();
+    let hw_info = tokio::task::spawn_blocking(move || {
+        let new_engine = ASREngine::new(model_type)
+            .map_err(|e| format!("切换模型失败: {}", e))?;
+        let hw_info = new_engine.hardware_info();
+        *engine_arc.lock() = Some(new_engine);
+        Ok::<String, String>(hw_info)
+    }).await.map_err(|e| format!("任务执行失败: {}", e))??;
+
+    // 更新内存配置并持久化保存
+    {
+        let mut cfg = state.config.lock();
+        cfg.asr_model = model_type.to_string();
+    }
+    if let Err(e) = state.config.lock().save(&*state.storage.lock()) {
+        log::warn!("保存模型配置失败: {}", e);
+    }
+
+    info!("ASR 模型切换成功: {}", hw_info);
+    Ok(hw_info)
+}
+
+/// 获取当前 ASR 模型信息
+#[tauri::command]
+async fn get_current_asr_model(state: State<'_, AppState>) -> Result<(String, String, bool), String> {
+    let model_type = state.config.lock().asr_model.parse::<ASRModelType>()
+        .unwrap_or(ASRModelType::Qwen3ASR);
+    let (name, _desc, available) = asr::get_model_info(model_type);
+    Ok((model_type.to_string(), name, available))
 }
 
 #[tauri::command]
@@ -828,11 +911,17 @@ fn main() {
             let handle_asr = handle.clone();
             tauri::async_runtime::spawn(async move {
                 let state: tauri::State<AppState> = handle_asr.state();
-                info!("ASR引擎开始加载（在独立线程中）...");
+                
+                // 获取配置的模型类型，默认使用 Qwen3-ASR
+                let model_type = state.config.lock().asr_model.parse::<ASRModelType>()
+                    .unwrap_or(ASRModelType::Qwen3ASR);
+                
+                info!("ASR引擎开始加载（在独立线程中）: {:?}...", model_type);
                 state.indicator.lock().set_loading();
-                match tokio::task::spawn_blocking(|| asr::SenseVoiceEngine::new()).await {
+                
+                match tokio::task::spawn_blocking(move || ASREngine::new(model_type)).await {
                     Ok(Ok(engine)) => {
-                        let hw_info = engine.hardware_info().to_string();
+                        let hw_info = engine.hardware_info();
                         *state.asr_engine.lock() = Some(engine);
                         info!("ASR引擎初始化成功: {}", hw_info);
                         state.indicator.lock().set_idle();
@@ -870,6 +959,9 @@ fn main() {
             read_skin_file,
             read_skin_background_base64,
             init_asr_engine,
+            get_available_asr_models,
+            switch_asr_model,
+            get_current_asr_model,
             list_audio_devices,
             show_indicator,
             hide_indicator,

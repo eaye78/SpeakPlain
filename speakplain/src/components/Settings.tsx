@@ -19,6 +19,7 @@ import {
   SaveOutlined,
   ReloadOutlined,
   SkinOutlined,
+  RobotOutlined,
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
@@ -48,16 +49,26 @@ const HOTKEY_OPTIONS = [
   { value: 0x7b, label: "F12" },
 ];
 
+interface ASRModel {
+  id: string;
+  name: string;
+  available: boolean;
+}
+
 function Settings() {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [audioDevices, setAudioDevices] = useState<string[]>([]);
   const [skins, setSkins] = useState<SkinListItem[]>([]);
+  const [asrModels, setAsrModels] = useState<ASRModel[]>([]);
+  const [currentAsrModel, setCurrentAsrModel] = useState<string>("sensevoice");
+  const [switchingModel, setSwitchingModel] = useState(false);
   const { config, updateConfig, currentSkinId, setCurrentSkinId } = useAppStore();
 
   useEffect(() => {
     loadConfig();
     loadAudioDevices();
+    loadASRModels();
     // 初始化皮肤系统并刷新列表
     skinManager.initialize().then(() => {
       refreshSkinList();
@@ -83,6 +94,43 @@ function Settings() {
       message.success("皮肤已切换");
     } else {
       message.error("切换皮肤失败");
+    }
+  };
+
+  const loadASRModels = async () => {
+    try {
+      const models = await invoke<[string, string, boolean][]>("get_available_asr_models");
+      setAsrModels(models.map(([id, name, available]) => ({ id, name, available })));
+      
+      const current = await invoke<[string, string, boolean]>("get_current_asr_model");
+      setCurrentAsrModel(current[0]);
+    } catch (err) {
+      console.error("加载 ASR 模型列表失败:", err);
+      // 设置默认模型列表，确保 UI 可以正常显示
+      setAsrModels([
+        { id: "sensevoice", name: "SenseVoice (阿里通义)", available: true },
+        { id: "qwen3-asr", name: "Qwen3-ASR-0.6B (阿里通义千问)", available: false },
+      ]);
+      setCurrentAsrModel("sensevoice");
+    }
+  };
+
+  const handleASRModelChange = async (modelId: string) => {
+    const modelName = asrModels.find(m => m.id === modelId)?.name ?? modelId;
+    setSwitchingModel(true);
+    const hide = message.loading(`正在加载 ${modelName}，请稍候...`, 0);
+    try {
+      await invoke<string>("switch_asr_model", { modelType: modelId });
+      setCurrentAsrModel(modelId);
+      message.success(`已切换至 ${modelName}`);
+      
+      // 更新表单中的配置
+      form.setFieldsValue({ asr_model: modelId });
+    } catch (err: any) {
+      message.error(`切换至 ${modelName} 失败: ` + err);
+    } finally {
+      hide();
+      setSwitchingModel(false);
     }
   };
 
@@ -161,6 +209,39 @@ function Settings() {
 
       <Card>
         <Title level={4}>
+          <RobotOutlined /> ASR 模型
+        </Title>
+        <Form form={form} layout="vertical">
+          <Form.Item name="asr_model" label="语音识别模型">
+            <Select
+              style={{ width: 300 }}
+              value={currentAsrModel}
+              onChange={handleASRModelChange}
+              loading={switchingModel}
+            >
+              {asrModels.map((model) => (
+                <Select.Option 
+                  key={model.id} 
+                  value={model.id}
+                  disabled={!model.available}
+                >
+                  <Space>
+                    {model.name}
+                    {!model.available && <Tag color="red">未安装</Tag>}
+                    {model.id === currentAsrModel && <Tag color="green">当前</Tag>}
+                  </Space>
+                </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+          <Text type="secondary">
+            选择模型后立即加载，加载完成前无法使用语音输入（可能需要数秒）
+          </Text>
+        </Form>
+      </Card>
+
+      <Card>
+        <Title level={4}>
           <KeyOutlined /> 热键设置
         </Title>
         <Form form={form} layout="vertical" initialValues={config}>
@@ -222,8 +303,9 @@ function Settings() {
           </Form.Item>
 
           <Form.Item name="vad_threshold" label="语音检测阈值">
-            <InputNumber min={0.01} max={0.5} step={0.01} />
+            <InputNumber min={0.001} max={0.5} step={0.001} />
           </Form.Item>
+          <Text type="secondary">数值越小越容易检测到语音（默认 0.005）</Text>
         </Form>
       </Card>
 
@@ -235,7 +317,7 @@ function Settings() {
           <Form.Item name="use_gpu" valuePropName="checked">
             <Switch checkedChildren="GPU" unCheckedChildren="CPU" />
           </Form.Item>
-          <Text type="secondary">使用 DirectML GPU 加速（自动回退到 CPU）</Text>
+          <Text type="secondary">优先使用 DirectML GPU 加速，不可用时自动回退到 CPU（重启后生效）</Text>
 
           <Divider />
 

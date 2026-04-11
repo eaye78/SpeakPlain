@@ -14,6 +14,9 @@ pub struct AppConfig {
     pub audio_device: Option<String>,
     pub sample_rate: u32,
     
+    // ASR 模型设置
+    pub asr_model: String,  // "sensevoice" 或 "qwen3-asr"
+    
     // 识别设置
     pub use_gpu: bool,
     pub language: String,  // "zh", "en", "auto"
@@ -54,6 +57,7 @@ impl Default for AppConfig {
             hotkey_name: "F2".to_string(),
             audio_device: None,
             sample_rate: 16000,
+            asr_model: "qwen3-asr".to_string(),  // 默认使用 Qwen3-ASR
             use_gpu: true,
             language: "auto".to_string(),
             use_itn: true,
@@ -68,7 +72,7 @@ impl Default for AppConfig {
             sound_feedback: true,
             auto_start: false,
             silence_timeout_ms: 3000,
-            vad_threshold: 0.01,
+            vad_threshold: 0.001,
             skin_id: "classic".to_string(),
         }
     }
@@ -88,6 +92,10 @@ impl AppConfig {
         
         if let Ok(Some(value)) = storage.get_setting("audio_device") {
             config.audio_device = Some(value);
+        }
+        
+        if let Ok(Some(value)) = storage.get_setting("asr_model") {
+            config.asr_model = value;
         }
         
         if let Ok(Some(value)) = storage.get_setting("use_gpu") {
@@ -160,6 +168,7 @@ impl AppConfig {
     pub fn save(&self, storage: &Storage) -> anyhow::Result<()> {
         storage.set_setting("hotkey_vk", &self.hotkey_vk.to_string())?;
         storage.set_setting("audio_device", &self.audio_device.clone().unwrap_or_default())?;
+        storage.set_setting("asr_model", &self.asr_model)?;
         storage.set_setting("use_gpu", &self.use_gpu.to_string())?;
         storage.set_setting("language", &self.language)?;
         storage.set_setting("remove_fillers", &self.remove_fillers.to_string())?;
