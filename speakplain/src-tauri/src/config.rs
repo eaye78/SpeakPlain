@@ -48,6 +48,11 @@ pub struct AppConfig {
     
     // 主题皮肤
     pub skin_id: String,
+
+    // 说人话功能配置
+    pub llm_enabled:     bool,   // 是否启用，默认 false
+    pub persona_id:      String, // 当前人设 ID，默认 "formal"
+    pub llm_provider_id: String, // 当前 LLM Provider ID
 }
 
 impl Default for AppConfig {
@@ -74,6 +79,9 @@ impl Default for AppConfig {
             silence_timeout_ms: 3000,
             vad_threshold: 0.001,
             skin_id: "classic".to_string(),
+            llm_enabled:     false,
+            persona_id:      "formal".to_string(),
+            llm_provider_id: String::new(),
         }
     }
 }
@@ -89,11 +97,23 @@ impl AppConfig {
                 config.hotkey_name = crate::hotkey::vk_to_name(vk);
             }
         }
+
+        if let Ok(Some(value)) = storage.get_setting("hotkey_name") {
+            if !value.is_empty() {
+                config.hotkey_name = value;
+            }
+        }
         
         if let Ok(Some(value)) = storage.get_setting("audio_device") {
             config.audio_device = Some(value);
         }
-        
+
+        if let Ok(Some(value)) = storage.get_setting("sample_rate") {
+            if let Ok(sr) = value.parse::<u32>() {
+                config.sample_rate = sr;
+            }
+        }
+
         if let Ok(Some(value)) = storage.get_setting("asr_model") {
             config.asr_model = value;
         }
@@ -105,7 +125,11 @@ impl AppConfig {
         if let Ok(Some(value)) = storage.get_setting("language") {
             config.language = value;
         }
-        
+
+        if let Ok(Some(value)) = storage.get_setting("use_itn") {
+            config.use_itn = value == "true";
+        }
+
         if let Ok(Some(value)) = storage.get_setting("remove_fillers") {
             config.remove_fillers = value == "true";
         }
@@ -121,7 +145,13 @@ impl AppConfig {
         if let Ok(Some(value)) = storage.get_setting("restore_clipboard") {
             config.restore_clipboard = value == "true";
         }
-        
+
+        if let Ok(Some(value)) = storage.get_setting("paste_delay_ms") {
+            if let Ok(ms) = value.parse::<u64>() {
+                config.paste_delay_ms = ms;
+            }
+        }
+
         if let Ok(Some(value)) = storage.get_setting("indicator_x") {
             if let Ok(x) = value.parse::<i32>() {
                 config.indicator_x = x;
@@ -161,20 +191,36 @@ impl AppConfig {
         if let Ok(Some(value)) = storage.get_setting("skin_id") {
             config.skin_id = value;
         }
-        
+
+        if let Ok(Some(value)) = storage.get_setting("llm_enabled") {
+            config.llm_enabled = value == "true";
+        }
+
+        if let Ok(Some(value)) = storage.get_setting("persona_id") {
+            config.persona_id = value;
+        }
+
+        if let Ok(Some(value)) = storage.get_setting("llm_provider_id") {
+            config.llm_provider_id = value;
+        }
+
         Ok(config)
     }
     
     pub fn save(&self, storage: &Storage) -> anyhow::Result<()> {
         storage.set_setting("hotkey_vk", &self.hotkey_vk.to_string())?;
+        storage.set_setting("hotkey_name", &self.hotkey_name)?;
         storage.set_setting("audio_device", &self.audio_device.clone().unwrap_or_default())?;
+        storage.set_setting("sample_rate", &self.sample_rate.to_string())?;
         storage.set_setting("asr_model", &self.asr_model)?;
         storage.set_setting("use_gpu", &self.use_gpu.to_string())?;
         storage.set_setting("language", &self.language)?;
+        storage.set_setting("use_itn", &self.use_itn.to_string())?;
         storage.set_setting("remove_fillers", &self.remove_fillers.to_string())?;
         storage.set_setting("capitalize_sentences", &self.capitalize_sentences.to_string())?;
         storage.set_setting("optimize_spacing", &self.optimize_spacing.to_string())?;
         storage.set_setting("restore_clipboard", &self.restore_clipboard.to_string())?;
+        storage.set_setting("paste_delay_ms", &self.paste_delay_ms.to_string())?;
         storage.set_setting("indicator_x", &self.indicator_x.to_string())?;
         storage.set_setting("indicator_y", &self.indicator_y.to_string())?;
         storage.set_setting("auto_hide_indicator", &self.auto_hide_indicator.to_string())?;
@@ -183,7 +229,10 @@ impl AppConfig {
         storage.set_setting("silence_timeout_ms", &self.silence_timeout_ms.to_string())?;
         storage.set_setting("vad_threshold", &self.vad_threshold.to_string())?;
         storage.set_setting("skin_id", &self.skin_id)?;
-        
+        storage.set_setting("llm_enabled", &self.llm_enabled.to_string())?;
+        storage.set_setting("persona_id", &self.persona_id)?;
+        storage.set_setting("llm_provider_id", &self.llm_provider_id)?;
+
         Ok(())
     }
 }

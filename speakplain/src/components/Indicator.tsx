@@ -189,7 +189,7 @@ function Indicator() {
       // processing 状态启动计时
       if (newStatus === "processing") {
         startProcTimer();
-      } else {
+      } else if (newStatus !== "refining") {
         stopProcTimer();
       }
     });
@@ -206,9 +206,10 @@ function Indicator() {
 
   const showAsRecording = status === "recording" || status === "freetalk";
   const isProcessing = status === "processing";
+  const isRefining = status === "refining";
   const isLoading = status === "loading";
   const isDone = status === "done";
-  const isError = status === "error" || status === "no_voice" || status === "cancelled";
+  const isError = status === "error" || status === "no_voice" || status === "cancelled" || status === "refine_failed";
 
   // 格式化计时
   const hh = Math.floor(elapsed / 3600);
@@ -218,8 +219,9 @@ function Indicator() {
 
   const stateLabel = isLoading ? "模型加载中..."
     : isProcessing ? `识别中 ${procElapsed > 0 ? procElapsed + "s" : ""}`
+    : isRefining ? `润色中 ${procElapsed > 0 ? procElapsed + "s" : ""}`
     : isDone ? "识别完成"
-    : isError ? (status === "no_voice" ? "未检测到语音" : status === "cancelled" ? "已取消" : "识别出错")
+    : isError ? (status === "no_voice" ? "未检测到语音" : status === "cancelled" ? "已取消" : status === "refine_failed" ? "润色失败" : "识别出错")
     : null;
 
   return (
@@ -236,11 +238,11 @@ function Indicator() {
           ref={canvasRef}
           className={`ind-wave-canvas${
             showAsRecording ? "" :
-            isProcessing    ? " ind-wave-canvas--processing" :
+            isProcessing || isRefining ? " ind-wave-canvas--processing" :
             " ind-wave-canvas--idle"
           }`}
         />
-        {isProcessing && (
+        {(isProcessing || isRefining) && (
           <div className="ind-proc-bar">
             <div className="ind-proc-track">
               <div className="ind-proc-fill" />

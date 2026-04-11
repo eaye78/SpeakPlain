@@ -11,6 +11,7 @@ mod asr_qwen3asr;
 mod indicator;
 mod config;
 mod tray;
+mod llm;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -223,10 +224,86 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
 
         info!("识别结果: {}", processed);
 
-        // 保存历史记录
+        // ── 说人话 LLM 润色层 ────────────────────────────────────────
+        info!("[LLM] 检查条件: llm_enabled={}, llm_provider_id='{}', persona_id='{}'",
+            cfg.llm_enabled, cfg.llm_provider_id, cfg.persona_id);
+
+        let (final_text, llm_text_opt, llm_success) = if cfg.llm_enabled && !cfg.llm_provider_id.is_empty() {
+            // 读取 provider 配置
+            let provider_cfg_opt = {
+                let storage = state.storage.lock();
+                let all_providers = storage.get_llm_providers().ok().unwrap_or_default();
+                info!("[LLM] 数据库中 provider 数量: {}, 查找 id='{}'",
+                    all_providers.len(), cfg.llm_provider_id);
+                all_providers.into_iter().find(|p| p.id == cfg.llm_provider_id)
+            };
+
+            if let Some(provider_cfg) = provider_cfg_opt {
+                info!("[LLM] 已找到 provider: name='{}', url='{}', model='{}'",
+                    provider_cfg.name, provider_cfg.api_base_url, provider_cfg.model_name);
+
+                // 获取人设
+                let persona = {
+                    let custom_personas = state.storage.lock().get_custom_personas().unwrap_or_default();
+                    info!("[LLM] 自定义人设数量: {}, 查找 persona_id='{}'", custom_personas.len(), cfg.persona_id);
+                    let custom_ids: std::collections::HashSet<String> =
+                        custom_personas.iter().map(|p| p.id.clone()).collect();
+                    let all_personas: Vec<llm::Persona> = llm::builtin_personas().into_iter()
+                        .filter(|p| !custom_ids.contains(&p.id))
+                        .chain(custom_personas.into_iter())
+                        .collect();
+                    let found = all_personas.into_iter()
+                        .find(|p| p.id == cfg.persona_id)
+                        .unwrap_or_else(|| llm::builtin_personas().into_iter().find(|p| p.id == "formal").unwrap());
+                    info!("[LLM] 使用人设: id='{}', name='{}'", found.id, found.name);
+                    found
+                };
+
+                // 显示润色中状态
+                state.indicator.lock().set_refining();
+
+                info!("[LLM] 开始调用 do_refine，原文: {:?}", processed);
+                match llm::do_refine(&provider_cfg, &persona, &processed).await {
+                    Ok(refined) => {
+                        info!("[LLM] 润色成功，结果: {:?}", refined);
+                        (refined.clone(), Some(refined), true)
+                    }
+                    Err(e) => {
+                        log::warn!("[LLM] 润色失败，降级使用原始文字: {}", e);
+                        state.indicator.lock().set_refine_failed("润色失败，已粘贴原文");
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        (processed.clone(), None, false)
+                    }
+                }
+            } else {
+                log::warn!("[LLM] Provider 未找到 (id='{}')，降级", cfg.llm_provider_id);
+                (processed.clone(), None, false)
+            }
+        } else {
+            info!("[LLM] 未启用或 provider_id 为空，跳过润色");
+            (processed.clone(), None, false)
+        };
+
+        // 保存历史记录（含 LLM 字段）
         {
             let storage = state.storage.lock();
-            let _ = storage.add_history(&processed, audio_data.len() as u32 / 16000);
+            let persona_id = if cfg.llm_enabled { Some(cfg.persona_id.as_str()) } else { None };
+            let provider_name: Option<String> = if cfg.llm_enabled && !cfg.llm_provider_id.is_empty() {
+                storage.get_llm_providers().ok()
+                    .and_then(|ps| ps.into_iter().find(|p| p.id == cfg.llm_provider_id))
+                    .map(|p| p.name)
+            } else {
+                None
+            };
+            let _ = storage.add_history_with_llm(
+                &final_text,
+                audio_data.len() as u32 / 16000,
+                Some(&processed),
+                llm_text_opt.as_deref(),
+                persona_id,
+                provider_name.as_deref(),
+                llm_success,
+            );
         }
 
         // 等待热键真正松开再粘贴，防止粘贴到自身（最多等 500ms）
@@ -256,9 +333,9 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
         // 粘贴文本
         {
             let mut paster = state.input_paster.lock();
-            if let Err(e) = paster.paste(&processed) {
+            if let Err(e) = paster.paste(&final_text) {
                 log::warn!("剩贴板粘贴失败，尝试直接输入: {}", e);
-                let _ = paster.type_text(&processed);
+                let _ = paster.type_text(&final_text);
             }
         }
 
@@ -270,7 +347,7 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
         }
 
         // 通知前端
-        app_handle.emit("recognition:complete", &processed).ok();
+        app_handle.emit("recognition:complete", &final_text).ok();
     });
 }
 
@@ -669,6 +746,106 @@ async fn drag_indicator(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
+// ── 说人话相关 Tauri 命令 ────────────────────────────────────────────────
+
+/// 获取所有可用人设（内置 + 自定义）
+#[tauri::command]
+async fn get_personas(state: State<'_, AppState>) -> Result<Vec<llm::Persona>, String> {
+    let builtins = llm::builtin_personas();
+    let custom = state.storage.lock().get_custom_personas().map_err(|e| e.to_string())?;
+    let custom_ids: std::collections::HashSet<String> = custom.iter().map(|p| p.id.clone()).collect();
+    let mut all: Vec<llm::Persona> = builtins.into_iter()
+        .filter(|p| !custom_ids.contains(&p.id))
+        .collect();
+    all.extend(custom);
+    Ok(all)
+}
+
+/// 保存自定义人设
+#[tauri::command]
+async fn save_persona(state: State<'_, AppState>, persona: llm::Persona) -> Result<(), String> {
+    if persona.is_builtin {
+        return Err("内置人设不可直接保存，请使用不同 ID的自定义人设覆盖".to_string());
+    }
+    state.storage.lock().save_persona(&persona).map_err(|e| e.to_string())
+}
+
+/// 删除自定义人设
+#[tauri::command]
+async fn delete_persona(state: State<'_, AppState>, persona_id: String) -> Result<(), String> {
+    state.storage.lock().delete_persona(&persona_id).map_err(|e| e.to_string())
+}
+
+/// 切换当前人设
+#[tauri::command]
+async fn set_persona(state: State<'_, AppState>, persona_id: String) -> Result<(), String> {
+    state.config.lock().persona_id = persona_id.clone();
+    state.storage.lock().set_setting("persona_id", &persona_id).map_err(|e| e.to_string())
+}
+
+/// 切换说人话功能开关
+#[tauri::command]
+async fn set_llm_enabled(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state.config.lock().llm_enabled = enabled;
+    state.storage.lock().set_setting("llm_enabled", if enabled { "true" } else { "false" })
+        .map_err(|e| e.to_string())
+}
+
+/// 获取所有 LLM Provider 配置
+#[tauri::command]
+async fn get_llm_providers(state: State<'_, AppState>) -> Result<Vec<llm::LlmProviderConfig>, String> {
+    state.storage.lock().get_llm_providers().map_err(|e| e.to_string())
+}
+
+/// 保存 LLM Provider 配置
+#[tauri::command]
+async fn save_llm_provider(state: State<'_, AppState>, provider: llm::LlmProviderConfig) -> Result<(), String> {
+    state.storage.lock().save_llm_provider(&provider).map_err(|e| e.to_string())
+}
+
+/// 删除 LLM Provider 配置
+#[tauri::command]
+async fn delete_llm_provider(state: State<'_, AppState>, provider_id: String) -> Result<(), String> {
+    // 如果删除的是当前使用的 provider，清空配置
+    let mut cfg = state.config.lock();
+    if cfg.llm_provider_id == provider_id {
+        cfg.llm_provider_id = String::new();
+    }
+    drop(cfg);
+    state.storage.lock().delete_llm_provider(&provider_id).map_err(|e| e.to_string())
+}
+
+/// 切换当前使用的 LLM Provider
+#[tauri::command]
+async fn set_llm_provider(state: State<'_, AppState>, provider_id: String) -> Result<(), String> {
+    state.config.lock().llm_provider_id = provider_id.clone();
+    state.storage.lock().set_setting("llm_provider_id", &provider_id).map_err(|e| e.to_string())
+}
+
+/// 测试 LLM Provider 连通性
+#[tauri::command]
+async fn test_llm_provider(provider: llm::LlmProviderConfig) -> Result<String, String> {
+    llm::test_provider(provider).await.map_err(|e| e.to_string())
+}
+
+/// 获取说人话功能当前配置
+#[tauri::command]
+async fn get_llm_config(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let cfg = state.config.lock();
+    Ok(serde_json::json!({
+        "llm_enabled":     cfg.llm_enabled,
+        "persona_id":      cfg.persona_id,
+        "llm_provider_id": cfg.llm_provider_id,
+    }))
+}
+
+/// 获取 Provider 类型的预填默认值
+#[tauri::command]
+async fn get_llm_provider_defaults(provider_type: String) -> Result<llm::LlmProviderConfig, String> {
+    let pt: llm::LlmProviderType = provider_type.parse().map_err(|e: anyhow::Error| e.to_string())?;
+    Ok(llm::LlmProviderConfig::default_for(pt))
+}
+
 /// 读取皮肤文件内容
 #[tauri::command]
 async fn read_skin_file(app_handle: AppHandle, skin_id: String, filename: String) -> Result<String, String> {
@@ -967,6 +1144,19 @@ fn main() {
             hide_indicator,
             move_indicator,
             drag_indicator,
+            // 说人话功能
+            get_personas,
+            save_persona,
+            delete_persona,
+            set_persona,
+            set_llm_enabled,
+            get_llm_providers,
+            save_llm_provider,
+            delete_llm_provider,
+            set_llm_provider,
+            test_llm_provider,
+            get_llm_config,
+            get_llm_provider_defaults,
         ])
         .run(tauri::generate_context!())
         .expect("运行应用时出错");

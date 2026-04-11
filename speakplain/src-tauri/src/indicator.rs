@@ -259,6 +259,44 @@ impl IndicatorWindow {
     /// 错误
     pub fn set_error(&self, msg: &str) { self.emit_status("error", msg); }
 
+    /// LLM 润色中（带计秒）
+    pub fn set_refining(&self) {
+        self.stop_recording_timer();
+        self.cancel_delayed_hide();
+        // 启动润色计时线程
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        *self.recording_stop_tx.lock().unwrap() = Some(tx);
+        let app_handle = self.app_handle.clone();
+        std::thread::spawn(move || {
+            let start = std::time::Instant::now();
+            for delay_ms in [10u64, 50, 100, 200, 500] {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                if rx.try_recv().is_ok() { return; }
+                let _ = app_handle.emit_to(
+                    tauri::EventTarget::WebviewWindow { label: "indicator".to_string() },
+                    "indicator:status",
+                    serde_json::json!({ "status": "refining", "message": "润色中 0s" }),
+                );
+            }
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                if rx.try_recv().is_ok() { break; }
+                let secs = start.elapsed().as_secs();
+                let _ = app_handle.emit_to(
+                    tauri::EventTarget::WebviewWindow { label: "indicator".to_string() },
+                    "indicator:status",
+                    serde_json::json!({ "status": "refining", "message": format!("润色中 {}s", secs) }),
+                );
+            }
+        });
+    }
+
+    /// LLM 润色失败
+    pub fn set_refine_failed(&self, msg: &str) {
+        self.stop_recording_timer();
+        self.emit_status("refine_failed", msg);
+    }
+
     /// 更新录音计时显示（freetalk 状态用）
     pub fn update_timer(&self, seconds: u64, is_freetalk: bool) {
         let time_str = format!("{}:{:02}", seconds / 60, seconds % 60);

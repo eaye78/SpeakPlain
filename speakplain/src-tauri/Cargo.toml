@@ -43,6 +43,15 @@ serde_json = "1.0"
 enigo = "0.2"
 arboard = "3.3"
 
+# HTTP client for LLM API calls
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Async trait
+async-trait = "0.1"
+
+# UUID generation
+uuid = { version = "1", features = ["v4"] }
+
 # Utils
 anyhow = "1.0"
 thiserror = "1.0"
