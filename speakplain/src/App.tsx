@@ -6,6 +6,7 @@ import {
   ThunderboltOutlined,
   CodeOutlined,
   MessageOutlined,
+  RadarChartOutlined,
 } from "@ant-design/icons";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -73,7 +74,6 @@ function App() {
           常规设置
         </span>
       ),
-      children: <Settings activeTab="general" />,
     },
     {
       key: "command",
@@ -83,7 +83,6 @@ function App() {
           指令模式
         </span>
       ),
-      children: <Settings activeTab="command" />,
     },
     {
       key: "llm",
@@ -93,7 +92,15 @@ function App() {
           说人话
         </span>
       ),
-      children: <Settings activeTab="llm" />,
+    },
+    {
+      key: "sdr",
+      label: (
+        <span>
+          <RadarChartOutlined />
+          SDR设备
+        </span>
+      ),
     },
     {
       key: "history",
@@ -103,7 +110,6 @@ function App() {
           历史记录
         </span>
       ),
-      children: <History />,
     },
   ];
 
@@ -120,7 +126,18 @@ function App() {
             onChange={setActiveTab}
             items={items}
             type="card"
+            renderTabBar={(props, DefaultTabBar) => <DefaultTabBar {...props} />}
+            style={{ marginBottom: 0 }}
+            tabBarStyle={{ marginBottom: 0 }}
           />
+          {/* 单一 Settings 实例，状态跨 Tab 共享 */}
+          <div style={{ background: "#fff", padding: 16, borderRadius: "0 0 8px 8px", border: "1px solid #f0f0f0", borderTop: "none" }}>
+            {activeTab !== "history" ? (
+              <Settings activeTab={activeTab as "general" | "command" | "llm" | "sdr"} />
+            ) : (
+              <History />
+            )}
+          </div>
         </div>
       </Content>
     </Layout>

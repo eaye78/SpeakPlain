@@ -13,6 +13,7 @@ mod config;
 mod tray;
 mod llm;
 mod command;
+mod sdr;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -46,6 +47,8 @@ pub struct AppState {
     pub silence_since: Arc<Mutex<Option<Instant>>>,
     /// 录音开始前的目标窗口 HWND（粘贴时恢复焦点用）
     pub target_hwnd: Arc<Mutex<isize>>,
+    /// SDR设备管理器
+    pub sdr_manager: Arc<Mutex<sdr::SdrManager>>,
 }
 
 impl AppState {
@@ -68,6 +71,10 @@ impl AppState {
         hk.is_recording_hotkey = hk_is_rec_hk;
         hk.press_time         = hk_press_time;
 
+        // 初始化 SDR 管理器并应用已保存的配置
+        let sdr_manager = sdr::SdrManager::new();
+        sdr_manager.apply_saved_config(&config.lock());
+
         Ok(Self {
             recorder: Arc::new(Mutex::new(audio::AudioRecorder::new()?)),
             hotkey_manager: Arc::new(Mutex::new(hk)),
@@ -80,6 +87,7 @@ impl AppState {
             freetalk_start: Arc::new(Mutex::new(None)),
             silence_since: Arc::new(Mutex::new(None)),
             target_hwnd: Arc::new(Mutex::new(0)),
+            sdr_manager: Arc::new(Mutex::new(sdr_manager)),
         })
     }
 
@@ -398,7 +406,6 @@ fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
 #[tauri::command]
 async fn start_recording(state: State<'_, AppState>) -> Result<(), String> {
     info!("开始录音 (hold-to-talk)");
-    // 记录当前前台窗口，粘贴时还给它
     #[cfg(windows)]
     {
         extern "system" { fn GetForegroundWindow() -> isize; }
@@ -428,7 +435,6 @@ async fn stop_recording(state: State<'_, AppState>, app_handle: AppHandle) -> Re
 #[tauri::command]
 async fn toggle_freetalk(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
     info!("切换自由说话模式");
-    // 记录当前前台窗口，粘贴时还给它
     #[cfg(windows)]
     {
         extern "system" { fn GetForegroundWindow() -> isize; }
@@ -445,7 +451,6 @@ async fn toggle_freetalk(state: State<'_, AppState>, app_handle: AppHandle) -> R
 
     state.recorder.lock().start().map_err(|e| e.to_string())?;
 
-    // 启动录音计时器
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let start = Instant::now();
@@ -963,6 +968,362 @@ async fn read_skin_background_base64(app_handle: AppHandle, skin_id: String) -> 
     Ok(general_purpose::STANDARD.encode(&bytes))
 }
 
+// ── SDR设备相关 Tauri 命令 ────────────────────────────────────────────────
+
+/// 获取SDR设备列表
+#[tauri::command]
+async fn sdr_get_devices(state: State<'_, AppState>) -> Result<Vec<sdr::SdrDeviceInfo>, String> {
+    state.sdr_manager.lock().list_devices().map_err(|e| e.to_string())
+}
+
+/// 连接SDR设备（仅连接，不自动启动IQ流）
+#[tauri::command]
+async fn sdr_connect(state: State<'_, AppState>, device_index: u32) -> Result<(), String> {
+    state.sdr_manager.lock().connect(device_index).map_err(|e| e.to_string())?;
+    // 注意：连接成功后不自动启动IQ流，需要用户手动点击"开始运行"
+    let mut cfg = state.config.lock();
+    cfg.sdr_device_index = Some(device_index);
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 断开SDR设备
+#[tauri::command]
+async fn sdr_disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    state.sdr_manager.lock().disconnect().map_err(|e| e.to_string())?;
+    // 断开设备后重置悬浮框状态
+    let indicator = state.indicator.lock();
+    indicator.stop_recording_timer();
+    indicator.set_idle();
+    indicator.hide();
+    Ok(())
+}
+
+/// 设置SDR接收频率
+#[tauri::command]
+async fn sdr_set_frequency(state: State<'_, AppState>, freq_mhz: f64) -> Result<(), String> {
+    state.sdr_manager.lock().set_frequency(freq_mhz).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_frequency_mhz = freq_mhz;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置SDR增益
+#[tauri::command]
+async fn sdr_set_gain(state: State<'_, AppState>, gain_db: i32) -> Result<(), String> {
+    state.sdr_manager.lock().set_gain(gain_db).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_gain_db = gain_db;
+    cfg.sdr_auto_gain = false;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置SDR自动增益
+#[tauri::command]
+async fn sdr_set_auto_gain(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    state.sdr_manager.lock().set_auto_gain(enabled).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_auto_gain = enabled;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置PPM频率校正
+#[tauri::command]
+async fn sdr_set_ppm(state: State<'_, AppState>, ppm: i32) -> Result<(), String> {
+    state.sdr_manager.lock().set_ppm_correction(ppm).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_ppm_correction = ppm;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置解调模式
+#[tauri::command]
+async fn sdr_set_demod_mode(state: State<'_, AppState>, mode: sdr::DemodMode) -> Result<(), String> {
+    state.sdr_manager.lock().set_demod_mode(mode.clone());
+    let mut cfg = state.config.lock();
+    cfg.sdr_demod_mode = mode;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置VAD邀值
+#[tauri::command]
+async fn sdr_set_vad_threshold(state: State<'_, AppState>, threshold: f32) -> Result<(), String> {
+    state.sdr_manager.lock().set_vad_threshold(threshold);
+    let mut cfg = state.config.lock();
+    cfg.sdr_vad_threshold = threshold;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置CTCSS亚音频频率
+#[tauri::command]
+async fn sdr_set_ctcss_tone(state: State<'_, AppState>, tone_hz: f32) -> Result<(), String> {
+    state.sdr_manager.lock().set_ctcss_tone(tone_hz);
+    let mut cfg = state.config.lock();
+    cfg.sdr_ctcss_tone = tone_hz;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 设置CTCSS检测门限
+#[tauri::command]
+async fn sdr_set_ctcss_threshold(state: State<'_, AppState>, threshold: f32) -> Result<(), String> {
+    state.sdr_manager.lock().set_ctcss_threshold(threshold);
+    let mut cfg = state.config.lock();
+    cfg.sdr_ctcss_threshold = threshold;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 获取SDR设备状态
+#[tauri::command]
+async fn sdr_get_status(state: State<'_, AppState>) -> Result<sdr::SdrStatus, String> {
+    Ok(state.sdr_manager.lock().get_status())
+}
+
+/// 获取虚拟音频设备列表
+#[tauri::command]
+async fn sdr_get_virtual_devices() -> Result<Vec<String>, String> {
+    sdr::SdrManager::list_virtual_devices().map_err(|e| e.to_string())
+}
+
+/// 获取所有音频输出设备（此接口替代旧的虚拟设备接口）
+#[tauri::command]
+async fn sdr_get_all_output_devices() -> Result<Vec<String>, String> {
+    sdr::SdrManager::list_virtual_devices().map_err(|e| e.to_string())
+}
+
+/// 设置SDR输出设备
+#[tauri::command]
+async fn sdr_set_output_device(state: State<'_, AppState>, device_name: String) -> Result<(), String> {
+    state.sdr_manager.lock().set_output_device(device_name.clone()).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_output_device = device_name;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
+/// 启动SDR音频流
+#[tauri::command]
+async fn sdr_start_stream(state: State<'_, AppState>) -> Result<(), String> {
+    state.sdr_manager.lock().start_stream().map_err(|e| e.to_string())
+}
+
+/// 停止SDR音频流
+#[tauri::command]
+async fn sdr_stop_stream(state: State<'_, AppState>) -> Result<(), String> {
+    state.sdr_manager.lock().stop_stream().map_err(|e| e.to_string())
+}
+
+/// 测试SDR设备连接
+#[tauri::command]
+async fn sdr_test_connection(state: State<'_, AppState>) -> Result<sdr::TestResult, String> {
+    state.sdr_manager.lock().test_connection().map_err(|e| e.to_string())
+}
+
+/// 通话测试：自动连接设备、启动音频流、仅播放音频，不触发 ASR
+#[tauri::command]
+async fn sdr_call_test_start(state: State<'_, AppState>, device_index: u32) -> Result<(), String> {
+    // 标记进入通话测试模式
+    state.sdr_manager.lock().call_test_mode.store(true, std::sync::atomic::Ordering::Relaxed);
+    // 若未连接则先连接
+    let connected = state.sdr_manager.lock().get_status().connected;
+    if !connected {
+        state.sdr_manager.lock().connect(device_index).map_err(|e| e.to_string())?;
+    }
+    // 若流未启动则启动
+    let streaming = state.sdr_manager.lock().get_status().streaming;
+    if !streaming {
+        state.sdr_manager.lock().start_stream().map_err(|e| e.to_string())?;
+    }
+    log::info!("SDR通话测试已启动，设备索引={}", device_index);
+    Ok(())
+}
+
+/// 停止通话测试
+#[tauri::command]
+async fn sdr_call_test_stop(state: State<'_, AppState>) -> Result<(), String> {
+    state.sdr_manager.lock().call_test_mode.store(false, std::sync::atomic::Ordering::Relaxed);
+    state.sdr_manager.lock().stop_stream().map_err(|e| e.to_string())?;
+    log::info!("SDR通话测试已停止");
+    Ok(())
+}
+
+/// 获取SDR音频缓冲并送入ASR识别
+/// 只有在SDR模式下（InputSource::Sdr）且音频缓冲非空时才触发ASR
+#[tauri::command]
+async fn sdr_trigger_asr(state: State<'_, AppState>, app_handle: AppHandle) -> Result<(), String> {
+    if !state.sdr_manager.lock().is_sdr_input() {
+        return Err("当前输入源不是SDR模式".to_string());
+    }
+    let audio_data = state.sdr_manager.lock().take_audio_buffer();
+    if audio_data.is_empty() {
+        return Err("SDR音频缓冲为空，请确保已开启音频流且有语音输入".to_string());
+    }
+    info!("SDR ASR触发：音频样本数={}", audio_data.len());
+    recognize_and_paste(app_handle, audio_data);
+    Ok(())
+}
+
+/// 读取 rtl_sdr 进程日志（排查硬件问题用）
+#[tauri::command]
+async fn sdr_get_rtlsdr_log() -> Result<String, String> {
+    Ok(sdr::get_rtlsdr_log(60))
+}
+
+/// 获取 rtl_sdr 日志文件路径
+#[tauri::command]
+async fn sdr_get_rtlsdr_log_path() -> Result<String, String> {
+    let p = std::env::temp_dir().join("speakplain_rtlsdr.log");
+    Ok(p.to_string_lossy().to_string())
+}
+
+/// 实时信号强度查询（前端轮询使用）
+#[tauri::command]
+async fn sdr_get_signal_strength(state: State<'_, AppState>) -> Result<f32, String> {
+    Ok(state.sdr_manager.lock().get_signal_strength())
+}
+
+/// 设置输入源：切到 SDR 时自动启动音频流并注册 VAD 回调；切回麦克风时停流
+#[tauri::command]
+async fn sdr_set_input_source(state: State<'_, AppState>, app_handle: AppHandle, source: sdr::InputSource) -> Result<(), String> {
+    let prev_source = state.sdr_manager.lock().get_input_source();
+    state.sdr_manager.lock().set_input_source(source.clone());
+    {
+        let mut cfg = state.config.lock();
+        cfg.sdr_input_source = source.clone();
+        let _ = cfg.save(&*state.storage.lock());
+    }
+
+    match source {
+        sdr::InputSource::Sdr => {
+            // SDR 模式：禁用热键，防止麦克风录音被意外触发
+            state.hotkey_manager.lock().set_recording_hotkey(true);
+            {
+                let h = app_handle.clone();
+                let signal_cb: Box<dyn Fn(f32) + Send + 'static> = Box::new(move |signal: f32| {
+                    let s: State<AppState> = h.state();
+                    s.indicator.lock().emit_volume(signal);
+                });
+                *state.sdr_manager.lock().on_signal.lock() = Some(signal_cb);
+            }
+
+            // 注册 VAD 状态变化回调 → 控制 indicator 录音/静音状态
+            {
+                let h = app_handle.clone();
+                let vad_cb: Box<dyn Fn(bool) + Send + 'static> = Box::new(move |has_voice: bool| {
+                    let s: State<AppState> = h.state();
+                    if has_voice {
+                        // 手台PTT按下（检测到语音）→ 显示接收中状态（不启动计时线程，避免重发事件覆盖processing）
+                        let indicator = s.indicator.lock();
+                        indicator.show();
+                        indicator.set_sdr_receiving();
+                    } else {
+                        // 手台PTT松开（信号彻底消失）→ 切换到处理中状态
+                        s.indicator.lock().set_processing();
+                    }
+                });
+                *state.sdr_manager.lock().on_vad_change.lock() = Some(vad_cb);
+            }
+
+            // 当切到 SDR 模式：注册语音段结束回调，自动启动流
+            let h = app_handle.clone();
+            let cb: Box<dyn Fn(Vec<f32>) + Send + 'static> = Box::new(move |audio_data: Vec<f32>| {
+                let handle = h.clone();
+                tauri::async_runtime::spawn(async move {
+                    info!("SDR VAD触发语音段结束，送入ASR，样本数={}", audio_data.len());
+                    recognize_and_paste(handle, audio_data);
+                });
+            });
+            *state.sdr_manager.lock().on_speech_end.lock() = Some(cb);
+
+            // 如果设备已连接且流未开启，自动启动
+            let (connected, streaming) = {
+                let st = state.sdr_manager.lock().get_status();
+                (st.connected, st.streaming)
+            };
+            if connected && !streaming {
+                info!("SDR模式已切换，自动启动音频流");
+                state.sdr_manager.lock().start_stream().map_err(|e| e.to_string())?;
+            }
+        }
+        sdr::InputSource::Microphone => {
+            // 切回麦克风：恢复热键，清除所有SDR回调并停流
+            state.hotkey_manager.lock().set_recording_hotkey(false);
+            *state.sdr_manager.lock().on_speech_end.lock() = None;
+            *state.sdr_manager.lock().on_signal.lock() = None;
+            *state.sdr_manager.lock().on_vad_change.lock() = None;
+            if prev_source == sdr::InputSource::Sdr {
+                let streaming = state.sdr_manager.lock().get_status().streaming;
+                if streaming {
+                    info!("已切换回麦克风，自动停止SDR音频流");
+                    state.sdr_manager.lock().stop_stream().map_err(|e| e.to_string())?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 获取输入源
+#[tauri::command]
+async fn sdr_get_input_source(state: State<'_, AppState>) -> Result<sdr::InputSource, String> {
+    Ok(state.sdr_manager.lock().get_input_source())
+}
+
+/// 启动 Zadig 驱动安装工具（以管理员权限运行，等待其退出后返回）
+#[tauri::command]
+async fn sdr_launch_zadig(app_handle: AppHandle) -> Result<(), String> {
+    // 查找 Zadig 的位置：优先与 exe 同目录，其次尝试资源路径
+    let zadig_path = {
+        let exe_dir = std::env::current_exe()
+            .map_err(|e| e.to_string())?
+            .parent()
+            .ok_or("无法获取exe目录".to_string())?
+            .to_path_buf();
+        let candidate = exe_dir.join("zadig.exe");
+        if candidate.exists() {
+            candidate
+        } else {
+            let res_path = app_handle.path().resource_dir()
+                .map_err(|e| e.to_string())?
+                .join("zadig.exe");
+            if res_path.exists() {
+                res_path
+            } else {
+                return Err("未找到 zadig.exe，请确认文件已存在于应用目录".to_string());
+            }
+        }
+    };
+
+    info!("启动 Zadig: {}", zadig_path.display());
+
+    // 以管理员权限启动 Zadig（-Wait 使 PowerShell 等待 Zadig 退出后才返回）
+    let status = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            &format!(
+                "Start-Process -FilePath '{}' -Verb RunAs -Wait",
+                zadig_path.to_string_lossy()
+            ),
+        ])
+        .status()
+        .map_err(|e| format!("启动失败: {}", e))?;
+
+    if status.success() {
+        info!("Zadig 已退出");
+        Ok(())
+    } else {
+        Err("用户取消了操作或 Zadig 启动失败".to_string())
+    }
+}
+
 fn main() {
     env_logger::init();
 
@@ -1071,13 +1432,14 @@ fn main() {
                 state.hotkey_manager.lock().init(handle.clone())?;
             }
 
-            // 监听热键事件，调用对应命令
+            // 监听热键事件，调用对应命令（SDR模式下热键全部忧略）
             {
                 let handle_hk = handle.clone();
                 handle.listen("hotkey:start_recording", move |_| {
                     let h = handle_hk.clone();
                     tauri::async_runtime::spawn(async move {
                         let s: State<AppState> = h.state();
+                        if s.sdr_manager.lock().is_sdr_input() { return; }
                         if let Err(e) = start_recording(s).await {
                             log::error!("开始录音失败: {}", e);
                         }
@@ -1089,6 +1451,7 @@ fn main() {
                     let h = handle_hk.clone();
                     tauri::async_runtime::spawn(async move {
                         let s: State<AppState> = h.state();
+                        if s.sdr_manager.lock().is_sdr_input() { return; }
                         if let Err(e) = stop_recording(s, h.clone()).await {
                             log::error!("停止录音失败: {}", e);
                         }
@@ -1100,6 +1463,7 @@ fn main() {
                     let h = handle_hk.clone();
                     tauri::async_runtime::spawn(async move {
                         let s: State<AppState> = h.state();
+                        if s.sdr_manager.lock().is_sdr_input() { return; }
                         if let Err(e) = toggle_freetalk(s, h.clone()).await {
                             log::error!("切换自由说话失败: {}", e);
                         }
@@ -1111,6 +1475,7 @@ fn main() {
                     let h = handle_hk.clone();
                     tauri::async_runtime::spawn(async move {
                         let s: State<AppState> = h.state();
+                        if s.sdr_manager.lock().is_sdr_input() { return; }
                         if let Err(e) = stop_freetalk(s, h.clone()).await {
                             log::error!("停止自由说话失败: {}", e);
                         }
@@ -1122,6 +1487,7 @@ fn main() {
                     let h = handle_hk.clone();
                     tauri::async_runtime::spawn(async move {
                         let s: State<AppState> = h.state();
+                        if s.sdr_manager.lock().is_sdr_input() { return; }
                         if let Err(e) = cancel_recording(s).await {
                             log::error!("取消录音失败: {}", e);
                         }
@@ -1208,6 +1574,34 @@ fn main() {
             command::get_command_mappings,
             command::save_command_mapping,
             command::delete_command_mapping,
+            // SDR设备功能
+            sdr_get_devices,
+            sdr_connect,
+            sdr_disconnect,
+            sdr_set_frequency,
+            sdr_set_gain,
+            sdr_set_auto_gain,
+            sdr_set_ppm,
+            sdr_set_demod_mode,
+            sdr_set_vad_threshold,
+            sdr_set_ctcss_tone,
+            sdr_set_ctcss_threshold,
+            sdr_get_status,
+            sdr_get_signal_strength,
+            sdr_get_virtual_devices,
+            sdr_get_all_output_devices,
+            sdr_set_output_device,
+            sdr_start_stream,
+            sdr_stop_stream,
+            sdr_test_connection,
+            sdr_call_test_start,
+            sdr_call_test_stop,
+            sdr_trigger_asr,
+            sdr_get_rtlsdr_log,
+            sdr_get_rtlsdr_log_path,
+            sdr_set_input_source,
+            sdr_get_input_source,
+            sdr_launch_zadig,
         ])
         .run(tauri::generate_context!())
         .expect("运行应用时出错");

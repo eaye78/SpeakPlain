@@ -116,6 +116,14 @@ models/
 
 > 国内用户推荐使用 [ModelScope 镜像](https://modelscope.cn) 下载，速度更快。
 
+#### RTL-SDR 驱动下载（使用无线电输入功能时需要）
+
+如需使用 SDR 无线电语音输入功能，请下载并安装 RTL-SDR 驱动：
+
+1. 下载驱动包：[RTL-SDR Blog 驱动（Release.zip）](http://github.com/rtlsdrblog/rtl-sdr-blog/releases/latest/download/Release.zip)
+2. 解压后将 `x64/`（或 `x86/`）目录下的所有文件复制到 `speakplain/sdr/x64/`（或 `speakplain/sdr/x86/`）
+3. 使用 [Zadig](https://zadig.akeo.ie/) 工具将 RTL-SDR 设备驱动替换为 **WinUSB**
+
 ---
 
 ### 👨‍💻 开发环境搭建

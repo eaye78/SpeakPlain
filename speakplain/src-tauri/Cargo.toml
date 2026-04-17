@@ -68,6 +68,8 @@ base64 = "0.22"
 realfft = "3"
 mel_filter = "0.1"
 
+# SDR Support - 通过 rtl_tcp.exe 子进程读取 IQ 数据，无需外部魔数库
+
 
 
 [package.metadata]

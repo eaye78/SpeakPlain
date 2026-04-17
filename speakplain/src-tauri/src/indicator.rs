@@ -258,6 +258,12 @@ impl IndicatorWindow {
     pub fn set_no_voice(&self)    { self.emit_status("no_voice",   "无语音"); }
     /// 错误
     pub fn set_error(&self, msg: &str) { self.emit_status("error", msg); }
+    /// SDR 接收中（不启动计时线程，仅发一次事件）
+    pub fn set_sdr_receiving(&self) {
+        self.cancel_delayed_hide();
+        self.stop_recording_timer(); // 确保没有遗留的计时线程
+        self.emit_status("recording", "SDR");
+    }
 
     /// LLM 润色中（带计秒）
     pub fn set_refining(&self) {

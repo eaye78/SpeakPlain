@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+﻿import { useState, useEffect, useRef } from "react";
 import {
   Card,
   Form,
@@ -16,6 +16,10 @@ import {
   List,
   Tooltip,
   Badge,
+  Radio,
+  Slider,
+  Alert,
+  Steps,
 } from "antd";
 import {
   KeyOutlined,
@@ -32,6 +36,8 @@ import {
   ApiOutlined,
   EyeOutlined,
   MacCommandOutlined,
+  DisconnectOutlined,
+  SignalFilled,
 } from "@ant-design/icons";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/appStore";
@@ -167,8 +173,67 @@ interface ASRModel {
 }
 
 interface SettingsProps {
-  activeTab: "general" | "command" | "llm";
+  activeTab: "general" | "command" | "llm" | "sdr";
 }
+
+// SDR类型定义
+interface SdrDeviceInfo {
+  index: number;
+  name: string;
+  tuner: string;
+  serial: string;
+  is_connected: boolean;
+}
+
+interface SdrStatus {
+  connected: boolean;
+  frequency_mhz: number;
+  gain_db: number;
+  signal_strength: number;
+  streaming: boolean;
+  output_device: string;
+  demod_mode: DemodMode;
+  ppm_correction: number;
+  vad_active: boolean;
+  mock_mode?: boolean;
+  debug_sample_rate: number;
+  debug_out_sample_rate: number;
+  debug_audio_queue_len: number;
+  debug_call_test_mode: boolean;
+  diag_audio_rms: number;
+  diag_iq_range: number;
+  diag_iq_dc_i: number;
+  ctcss_tone: number;
+  ctcss_threshold: number;
+  ctcss_detected: boolean;
+  ctcss_strength: number;
+}
+
+type InputSource = "microphone" | "sdr";
+type DemodMode = "nbfm" | "wbfm" | "am" | "usb" | "lsb";
+
+interface SdrConfig {
+  enabled: boolean;
+  device_index?: number;
+  frequency_mhz: number;
+  gain_db: number;
+  auto_gain: boolean;
+  output_device: string;
+  input_source: InputSource;
+  demod_mode: DemodMode;
+  ppm_correction: number;
+  vad_threshold: number;
+  ctcss_tone: number;
+  ctcss_threshold: number;
+}
+
+const DEMOD_OPTIONS: { value: DemodMode; label: string; desc: string }[] = [
+  { value: "nbfm", label: "NBFM", desc: "窄带调频（对讲机/业余，推荐）" },
+  { value: "wbfm", label: "WBFM", desc: "宽带调频（FM广播）" },
+  { value: "am",   label: "AM",   desc: "调幅（航空/短波）" },
+  { value: "usb",  label: "USB",  desc: "上边带单边带" },
+  { value: "lsb",  label: "LSB",  desc: "下边带单边带" },
+];
 
 function Settings({ activeTab }: SettingsProps) {
   const [form] = Form.useForm();
@@ -208,16 +273,54 @@ function Settings({ activeTab }: SettingsProps) {
   const [editingMapping, setEditingMapping] = useState<Partial<CommandMapping> | null>(null);
   const [mappingForm] = Form.useForm();
 
+  // ── SDR设备状态 ─────────────────────────────────────────────────
+  const [sdrDevices, setSdrDevices] = useState<SdrDeviceInfo[]>([]);
+  const [sdrAllDevices, setSdrAllDevices] = useState<string[]>([]);
+  const [sdrStatus, setSdrStatus] = useState<SdrStatus | null>(null);
+  const [sdrConfig, setSdrConfig] = useState<SdrConfig>({
+    enabled: false,
+    frequency_mhz: 144.5,
+    gain_db: 30,
+    auto_gain: false,
+    output_device: "",
+    input_source: "microphone",
+    demod_mode: "nbfm",
+    ppm_correction: 0,
+    vad_threshold: 0.01,
+    ctcss_tone: 0,
+    ctcss_threshold: 0.15,
+  });
+  const [sdrLoading, setSdrLoading] = useState(false);
+  const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<number | null>(null);
+  const [sdrSignal, setSdrSignal] = useState(0);
+  const [zadigLoading, setZadigLoading] = useState(false);
+  const [callTesting, setCallTesting] = useState(false);
+  const [showSdrAdvanced, setShowSdrAdvanced] = useState(false);
+  const [lastTestSnapshot, setLastTestSnapshot] = useState<{ status: SdrStatus; signal: number; stoppedAt: Date } | null>(null);
+  const [rtlsdrLog, setRtlsdrLog] = useState<string | null>(null);
+  const [rtlsdrLogPath, setRtlsdrLogPath] = useState<string>("");
+  const sdrSignalTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   useEffect(() => {
     loadConfig();
     loadAudioDevices();
     loadASRModels();
     loadLlmData();
     loadCommandMappings();
+    loadSdrData();
     skinManager.initialize().then(() => { refreshSkinList(); });
     const unsubscribe = onSkinChange((skin) => { setCurrentSkinId(skin.id); });
     return () => unsubscribe();
   }, []);
+
+  // activeTab 切换到常规设置时同步 input_source（单实例跨Tab共享状态）
+  useEffect(() => {
+    if (activeTab === "general") {
+      invoke<InputSource>("sdr_get_input_source")
+        .then((src) => setSdrConfig(prev => ({ ...prev, input_source: src })))
+        .catch(() => {});
+    }
+  }, [activeTab]);
 
   // ── 指令模式数据加载 ─────────────────────────────────────────────
 
@@ -542,26 +645,59 @@ function Settings({ activeTab }: SettingsProps) {
       </Card>
 
       <Card>
-        <Title level={4}><AudioOutlined /> 音频设置</Title>
-        <Form form={form} layout="vertical" onValuesChange={handleSettingChange}>
-          <Form.Item name="audio_device" label="麦克风设备">
-            <Select style={{ width: 300 }} placeholder="使用默认设备" allowClear
-              dropdownRender={(menu) => (
-                <>{menu}<div style={{ padding: "4px 8px", borderTop: "1px solid #f0f0f0" }}>
-                  <Button type="link" icon={<ReloadOutlined />} size="small" onClick={loadAudioDevices}>刷新设备列表</Button>
-                </div></>
-              )}>
-              {audioDevices.map((device) => (<Option key={device} value={device}>{device}</Option>))}
-            </Select>
-          </Form.Item>
-          <Form.Item name="silence_timeout_ms" label="静音自动停止 (毫秒)">
-            <InputNumber min={1000} max={10000} step={500} />
-          </Form.Item>
-          <Form.Item name="vad_threshold" label="语音检测阈值">
-            <InputNumber min={0.001} max={0.5} step={0.001} />
-          </Form.Item>
-          <Text type="secondary">数值越小越容易检测到语音（默认 0.005）</Text>
-        </Form>
+        <Title level={4}><AudioOutlined /> 音频输入</Title>
+        <Space direction="vertical" style={{ width: "100%" }}>
+          {/* 输入源选择 —— 统一入口 */}
+          <div>
+            <Text strong style={{ display: "block", marginBottom: 8 }}>语音输入来源</Text>
+            <Radio.Group
+              value={sdrConfig.input_source}
+              onChange={(e) => handleInputSourceChange(e.target.value)}
+              buttonStyle="solid"
+            >
+              <Radio.Button value="microphone">
+                <Space><AudioOutlined /> 麦克风</Space>
+              </Radio.Button>
+              <Radio.Button value="sdr">
+                <Space><SignalFilled /> SDR无线电</Space>
+              </Radio.Button>
+            </Radio.Group>
+          </div>
+
+          {/* 麦克风模式：显示设备选择和参数 */}
+          {sdrConfig.input_source === "microphone" && (
+            <Form form={form} layout="vertical" onValuesChange={handleSettingChange} style={{ marginTop: 4 }}>
+              <Form.Item name="audio_device" label="麦克风设备" style={{ marginBottom: 8 }}>
+                <Select style={{ width: 300 }} placeholder="使用默认设备" allowClear
+                  dropdownRender={(menu) => (
+                    <>{menu}<div style={{ padding: "4px 8px", borderTop: "1px solid #f0f0f0" }}>
+                      <Button type="link" icon={<ReloadOutlined />} size="small" onClick={loadAudioDevices}>刷新设备列表</Button>
+                    </div></>
+                  )}>
+                  {audioDevices.map((device) => (<Option key={device} value={device}>{device}</Option>))}
+                </Select>
+              </Form.Item>
+              <Form.Item name="silence_timeout_ms" label="静音自动停止 (毫秒)" style={{ marginBottom: 8 }}>
+                <InputNumber min={1000} max={10000} step={500} />
+              </Form.Item>
+              <Form.Item name="vad_threshold" label="语音检测阈值" style={{ marginBottom: 4 }}>
+                <InputNumber min={0.001} max={0.5} step={0.001} />
+              </Form.Item>
+              <Text type="secondary">数值越小越容易检测到语音（默认 0.005）</Text>
+            </Form>
+          )}
+
+          {/* SDR 模式：引导提示 */}
+          {sdrConfig.input_source === "sdr" && (
+            <Alert
+              message="已切换至 SDR 无线电输入"
+              description="热键录音将从 SDR 接收的音频中识别文字。请前往「SDR 设置」页面配置接收频率、解调模式等参数。"
+              type="success"
+              showIcon
+              style={{ marginTop: 4 }}
+            />
+          )}
+        </Space>
       </Card>
 
       <Card>
@@ -878,6 +1014,889 @@ function Settings({ activeTab }: SettingsProps) {
     </Space>
   );
 
+  // ── SDR设备数据加载 ─────────────────────────────────────────────
+
+  const loadSdrData = async () => {
+    try {
+      const [devices, allDevs, status, inputSource] = await Promise.all([
+        invoke<SdrDeviceInfo[]>("sdr_get_devices"),
+        invoke<string[]>("sdr_get_all_output_devices"),
+        invoke<SdrStatus>("sdr_get_status"),
+        invoke<InputSource>("sdr_get_input_source"),
+      ]);
+      setSdrDevices(devices);
+      setSdrAllDevices(allDevs);
+      setSdrStatus(status);
+      setSdrSignal(status.signal_strength);
+      // 若只有一台设备且未连接，自动预选
+      setSelectedDeviceIndex(prev => {
+        if (prev !== null) return prev;
+        if (devices.length === 1 && !status.connected) return devices[0].index;
+        return null;
+      });
+      setSdrConfig(prev => ({
+        ...prev,
+        frequency_mhz: status.frequency_mhz,
+        gain_db: status.gain_db,
+        output_device: status.output_device,
+        demod_mode: status.demod_mode,
+        ppm_correction: status.ppm_correction,
+        input_source: inputSource,
+        ctcss_tone: status.ctcss_tone,
+        ctcss_threshold: status.ctcss_threshold,
+      }));
+    } catch (err) {
+      console.error("加载SDR数据失败:", err);
+    }
+  };
+
+  const handleLaunchZadig = async () => {
+    setZadigLoading(true);
+    try {
+      await invoke("sdr_launch_zadig");
+      // Zadig 已退出，自动刷新设备列表
+      message.success("驱动安装完成，正在刷新设备列表…");
+      await loadSdrData();
+    } catch (err: any) {
+      const msg = String(err);
+      if (msg.includes("取消")) {
+        message.info("已取消驱动安装");
+      } else {
+        message.error("启动 Zadig 失败: " + msg);
+      }
+    } finally {
+      setZadigLoading(false);
+    }
+  };
+
+  const handleSdrConnect = async (deviceIndex: number) => {
+    setSdrLoading(true);
+    try {
+      await invoke("sdr_connect", { deviceIndex });
+      message.success("SDR设备已连接");
+      await loadSdrData();
+      // 注意：连接成功后不自动启动信号轮询，只有点击"开始运行"后才启动
+    } catch (err: any) {
+      const errMsg = String(err);
+      Modal.error({
+        title: "SDR设备连接失败",
+        content: (
+          <div style={{ whiteSpace: "pre-wrap", marginTop: 8, lineHeight: 1.8 }}>
+            {errMsg}
+          </div>
+        ),
+        width: 480,
+        okText: "知道了",
+      });
+    } finally {
+      setSdrLoading(false);
+    }
+  };
+
+  const handleSdrDisconnect = async () => {
+    setSdrLoading(true);
+    try {
+      // 断开前先停止轮询
+      if (sdrSignalTimerRef.current) { clearInterval(sdrSignalTimerRef.current); sdrSignalTimerRef.current = null; }
+      await invoke("sdr_disconnect");
+      message.success("SDR设备已断开");
+      setSdrSignal(0);
+      await loadSdrData();
+    } catch (err: any) {
+      message.error("断开失败: " + err);
+    } finally {
+      setSdrLoading(false);
+    }
+  };;
+
+  const handleSdrSetFrequency = async (freq: number) => {
+    try {
+      await invoke("sdr_set_frequency", { freqMhz: freq });
+      setSdrConfig(prev => ({ ...prev, frequency_mhz: freq }));
+      message.success(`频率已设置为 ${freq} MHz`);
+    } catch (err: any) {
+      message.error("设置频率失败: " + err);
+    }
+  };
+
+  const handleSdrSetGain = async (gain: number) => {
+    try {
+      await invoke("sdr_set_gain", { gainDb: gain });
+      setSdrConfig(prev => ({ ...prev, gain_db: gain, auto_gain: false }));
+    } catch (err: any) {
+      message.error("设置增益失败: " + err);
+    }
+  };
+
+  const handleSdrSetAutoGain = async (enabled: boolean) => {
+    try {
+      await invoke("sdr_set_auto_gain", { enabled });
+      setSdrConfig(prev => ({ ...prev, auto_gain: enabled }));
+    } catch (err: any) {
+      message.error("设置自动增益失败: " + err);
+    }
+  };
+
+  const handleSdrSetDemodMode = async (mode: DemodMode) => {
+    try {
+      await invoke("sdr_set_demod_mode", { mode });
+      setSdrConfig(prev => ({ ...prev, demod_mode: mode }));
+      message.success(`解调模式已切换为 ${DEMOD_OPTIONS.find(o => o.value === mode)?.label}`);
+    } catch (err: any) {
+      message.error("切换解调模式失败: " + err);
+    }
+  };
+
+  const handleSdrSetPpm = async (ppm: number) => {
+    try {
+      await invoke("sdr_set_ppm", { ppm });
+      setSdrConfig(prev => ({ ...prev, ppm_correction: ppm }));
+    } catch (err: any) {
+      message.error("设置PPM失败: " + err);
+    }
+  };
+
+  const handleSdrSetVadThreshold = async (threshold: number) => {
+    try {
+      await invoke("sdr_set_vad_threshold", { threshold });
+      setSdrConfig(prev => ({ ...prev, vad_threshold: threshold }));
+    } catch (err: any) {
+      message.error("设置VAD阈值失败: " + err);
+    }
+  };
+
+  const handleSdrSetCtcssTone = async (tone: number) => {
+    try {
+      await invoke("sdr_set_ctcss_tone", { toneHz: tone });
+      setSdrConfig(prev => ({ ...prev, ctcss_tone: tone }));
+    } catch (err: any) {
+      message.error("设置CTCSS频率失败: " + err);
+    }
+  };
+
+  const handleSdrSetCtcssThreshold = async (threshold: number) => {
+    try {
+      await invoke("sdr_set_ctcss_threshold", { threshold });
+      setSdrConfig(prev => ({ ...prev, ctcss_threshold: threshold }));
+    } catch (err: any) {
+      message.error("设置CTCSS门限失败: " + err);
+    }
+  };
+
+  const handleSdrSetOutputDevice = async (device: string) => {
+    try {
+      await invoke("sdr_set_output_device", { deviceName: device });
+      setSdrConfig(prev => ({ ...prev, output_device: device }));
+    } catch (err: any) {
+      message.error("设置输出设备失败: " + err);
+    }
+  };
+
+  const handleSdrStartStream = async () => {
+    try {
+      await invoke("sdr_start_stream");
+      message.success("已开始接收信号");
+      await loadSdrData();
+      // 启动信号强度轮询
+      if (sdrSignalTimerRef.current) clearInterval(sdrSignalTimerRef.current);
+      const timer = setInterval(async () => {
+        try {
+          const [strength, status] = await Promise.all([
+            invoke<number>("sdr_get_signal_strength"),
+            invoke<SdrStatus>("sdr_get_status"),
+          ]);
+          setSdrSignal(strength);
+          setSdrStatus(status);
+        } catch {}
+      }, 300);
+      sdrSignalTimerRef.current = timer;
+    } catch (err: any) {
+      message.error("启动接收失败: " + err);
+    }
+  };
+
+  const handleSdrStopStream = async () => {
+    try {
+      await invoke("sdr_stop_stream");
+      if (sdrSignalTimerRef.current) { clearInterval(sdrSignalTimerRef.current); sdrSignalTimerRef.current = null; }
+      message.success("已停止接收信号");
+      await loadSdrData();
+    } catch (err: any) {
+      message.error("停止接收失败: " + err);
+    }
+  };
+
+  const handleCallTestStart = async () => {
+    if (selectedDeviceIndex === null) {
+      message.warning("请先选择SDR设备");
+      return;
+    }
+    // 重置上次快照，开始新一轮测试
+    setLastTestSnapshot(null);
+    setCallTesting(true);
+    try {
+      await invoke("sdr_call_test_start", { deviceIndex: selectedDeviceIndex });
+      message.success("通话测试已开始，请按下手台PTT话务");  
+      await loadSdrData();
+      // 启动信号强度轮询
+      if (sdrSignalTimerRef.current) clearInterval(sdrSignalTimerRef.current);
+      const timer = setInterval(async () => {
+        try {
+          const [strength, status] = await Promise.all([
+            invoke<number>("sdr_get_signal_strength"),
+            invoke<SdrStatus>("sdr_get_status"),
+          ]);
+          setSdrSignal(strength);
+          setSdrStatus(status);
+        } catch {}
+      }, 300);
+      sdrSignalTimerRef.current = timer;
+    } catch (err: any) {
+      setCallTesting(false);
+      message.error("通话测试失败: " + err);
+    }
+  };
+
+  const handleCallTestStop = async () => {
+    try {
+      await invoke("sdr_call_test_stop");
+      if (sdrSignalTimerRef.current) { clearInterval(sdrSignalTimerRef.current); sdrSignalTimerRef.current = null; }
+      // 保存当前状态快照，供停止后继续展示调试信息
+      setSdrStatus(prev => {
+        if (prev) setLastTestSnapshot({ status: prev, signal: sdrSignal, stoppedAt: new Date() });
+        return prev;
+      });
+      message.success("通话测试已停止");
+      await loadSdrData();
+    } catch (err: any) {
+      message.error("停止失败: " + err);
+    } finally {
+      setCallTesting(false);
+    }
+  };
+
+  const handleViewRtlsdrLog = async () => {
+    try {
+      const [log, path] = await Promise.all([
+        invoke<string>("sdr_get_rtlsdr_log"),
+        invoke<string>("sdr_get_rtlsdr_log_path"),
+      ]);
+      setRtlsdrLog(log || "(日志为空)");
+      setRtlsdrLogPath(path);
+    } catch (err: any) {
+      setRtlsdrLog("读取失败: " + err);
+    }
+  };
+
+  const handleInputSourceChange = async (source: InputSource) => {
+    try {
+      await invoke("sdr_set_input_source", { source });
+      setSdrConfig(prev => ({ ...prev, input_source: source }));
+      message.success(source === "sdr" ? "已切换至SDR语音输入" : "已切换至麦克风输入");
+    } catch (err: any) {
+      message.error("切换输入源失败: " + err);
+    }
+  };
+
+  // SDR设置内容
+  const renderSdrContent = () => {
+    // 计算当前向导步骤（0-based）
+    // 步骤0: 连接设备 -> 步骤1: 设置频率(含亚音) -> 步骤2: 运行设备(开始接收) -> 步骤3: 启用语音识别
+    const wizardStep = !sdrStatus?.connected ? 0
+      : !sdrStatus?.streaming ? 1
+      : sdrConfig.input_source !== "sdr" ? 2
+      : 3;
+
+    return (
+      <Space direction="vertical" style={{ width: "100%" }} size="large">
+
+        {/* 向导步骤条 */}
+        <Steps
+          current={wizardStep}
+          size="small"
+          items={[
+            {
+              title: "连接设备",
+              description: sdrStatus?.connected ? `已连接 ${sdrDevices[0]?.tuner || ""}` : "插入RTL-SDR",
+              status: sdrStatus?.connected ? "finish" : "process",
+            },
+            {
+              title: "设置频率",
+              description: sdrStatus?.connected ? `${sdrConfig.frequency_mhz.toFixed(3)} MHz${sdrConfig.ctcss_tone > 0 ? ` / ${sdrConfig.ctcss_tone}Hz` : ""}` : "连接后可设置",
+              status: !sdrStatus?.connected ? "wait" : sdrStatus?.streaming ? "finish" : "process",
+            },
+            {
+              title: "运行设备",
+              description: sdrStatus?.streaming ? "✅ 接收信号中" : "启动音频流",
+              status: !sdrStatus?.connected ? "wait" : sdrStatus?.streaming ? "finish" : "process",
+            },
+            {
+              title: "启用识别",
+              description: sdrConfig.input_source === "sdr" ? "✅ 语音识别中" : "切换语音输入源",
+              status: sdrStatus?.streaming && sdrConfig.input_source === "sdr" ? "finish" : sdrStatus?.streaming ? "process" : "wait",
+            },
+          ]}
+        />
+
+        {/* 步骤 1：连接设备 */}
+        <Card
+          size="small"
+          styles={{ header: { background: wizardStep === 0 ? "#e6f7ff" : undefined } }}
+          title={
+            <Space>
+              <Tag color={sdrStatus?.connected ? "success" : "processing"} style={{ margin: 0 }}>
+                {sdrStatus?.connected ? "✓" : "1"}
+              </Tag>
+              <Text strong>连接 SDR 设备</Text>
+              {sdrStatus?.connected && <Tag color="green">已完成</Tag>}
+            </Space>
+          }
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Space>
+              <Select
+                style={{ width: 240 }}
+                placeholder="选择SDR设备"
+                disabled={sdrStatus?.connected}
+                value={sdrStatus?.connected ? sdrDevices.find(d => d.is_connected)?.index : selectedDeviceIndex}
+                onChange={(val) => setSelectedDeviceIndex(val)}
+              >
+                {sdrDevices.map((dev) => (
+                  <Select.Option key={dev.index} value={dev.index}>
+                    {dev.name} ({dev.tuner}) {dev.serial && `[SN:${dev.serial}]`}
+                  </Select.Option>
+                ))}
+              </Select>
+              {!sdrStatus?.connected ? (
+                <Button
+                  type="primary"
+                  onClick={() => selectedDeviceIndex !== null && handleSdrConnect(selectedDeviceIndex)}
+                  loading={sdrLoading}
+                  disabled={selectedDeviceIndex === null}
+                >
+                  连接设备
+                </Button>
+              ) : (
+                <Button
+                  danger
+                  icon={<DisconnectOutlined />}
+                  onClick={handleSdrDisconnect}
+                  loading={sdrLoading}
+                >
+                  断开
+                </Button>
+              )}
+              <Button icon={<ReloadOutlined />} size="small" onClick={loadSdrData} />
+            </Space>
+            {sdrStatus?.connected && (
+              <Space direction="vertical" style={{ marginTop: 4, width: "100%" }}>
+                {/* 设备信息 */}
+                <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>
+                  {(() => {
+                    const connectedDev = sdrDevices.find(d => d.is_connected);
+                    if (connectedDev) {
+                      return (
+                        <span>
+                          <b>已连接设备:</b> {connectedDev.name} ({connectedDev.tuner})
+                          {connectedDev.serial && (
+                            <span style={{ marginLeft: 8, color: "#888", fontFamily: "monospace" }}>
+                              SN:{connectedDev.serial}
+                            </span>
+                          )}
+                        </span>
+                      );
+                    }
+                    return <span><b>已连接设备:</b> 设备 #{sdrConfig.device_index ?? 0}</span>;
+                  })()}
+                </div>
+                <Space>
+                  <Tag color="blue" style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}>
+                    📡 {sdrConfig.frequency_mhz.toFixed(3)} MHz
+                  </Tag>
+                  <Tag
+                    color={sdrSignal > 0.6 ? "red" : sdrSignal > 0.2 ? "orange" : sdrSignal > 0.05 ? "green" : "default"}
+                    style={{ fontVariantNumeric: "tabular-nums", fontSize: 13 }}
+                  >
+                    信号 {sdrStatus.connected ? `${Math.min(100, Math.round(sdrSignal * 100))}%` : "—"}
+                  </Tag>
+                  {sdrConfig.ctcss_tone > 0 && (
+                    <Tag color="cyan" style={{ fontSize: 12 }}>
+                      🔇 {sdrConfig.ctcss_tone}Hz
+                    </Tag>
+                  )}
+                  {sdrStatus.connected && (
+                    <Badge
+                      status={sdrStatus.vad_active ? "processing" : "default"}
+                      text={<Text style={{ fontSize: 12 }}>{sdrStatus.vad_active ? "检测到语音" : "静音"}</Text>}
+                    />
+                  )}
+                </Space>
+              </Space>
+            )}
+            {sdrDevices.length === 0 && (
+              <Alert
+                message="未检测到 SDR 设备"
+                description={
+                  <div style={{ lineHeight: 1.8 }}>
+                    <div style={{ marginBottom: 8 }}>
+                      Windows 默认驱动不兼容，需要替换为 WinUSB 才能识别设备。点击下方按钮自动完成安装（仅首次需要）。
+                    </div>
+                    <Button
+                      type="primary"
+                      loading={zadigLoading}
+                      onClick={handleLaunchZadig}
+                      style={{ marginBottom: 8 }}
+                    >
+                      {zadigLoading ? "正在安装驱动…安装完成后请点击 Zadig 中的 Install Driver" : "一键安装 WinUSB 驱动"}
+                    </Button>
+                    <div style={{ fontSize: 12, color: "#888" }}>
+                      将弹出管理员权限确认和 Zadig 界面。在 Zadig 中找到设备，选择 <b>WinUSB</b>，点击 <b>Install Driver</b>，完成后关闭 Zadig 即可。
+                    </div>
+                    <div style={{ fontSize: 12, color: "#aaa", marginTop: 6 }}>
+                      手动下载：
+                      <a href="https://zadig.akeo.ie/downloads/" target="_blank" rel="noreferrer">Zadig 官网</a>
+                      {" · "}
+                      <a href="http://github.com/rtlsdrblog/rtl-sdr-blog/releases/latest/download/Release.zip" target="_blank" rel="noreferrer">RTL-SDR 驱动</a>
+                    </div>
+                  </div>
+                }
+                type="warning"
+                showIcon
+              />
+            )}
+          </Space>
+        </Card>
+
+        {/* 步骤 2：设置频率（含亚音） */}
+        <Card
+          size="small"
+          styles={{ header: { background: wizardStep === 1 ? "#e6f7ff" : undefined } }}
+          title={
+            <Space>
+              <Tag color={sdrStatus?.streaming ? "success" : sdrStatus?.connected ? "processing" : "default"} style={{ margin: 0 }}>
+                {sdrStatus?.streaming ? "✓" : "2"}
+              </Tag>
+              <Text strong>设置接收频率</Text>
+              {sdrStatus?.connected && !sdrStatus?.streaming && <Tag color="blue">请操作</Tag>}
+              {sdrStatus?.streaming && <Tag color="green">已完成</Tag>}
+            </Space>
+          }
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Space wrap>
+              <InputNumber
+                min={22}
+                max={1100}
+                step={0.001}
+                precision={3}
+                value={sdrConfig.frequency_mhz}
+                onChange={(val) => val && handleSdrSetFrequency(val)}
+                addonAfter="MHz"
+                style={{ width: 180 }}
+                disabled={!sdrStatus?.connected}
+              />
+              <Button
+                onClick={() => handleSdrSetFrequency(144.500)}
+                disabled={!sdrStatus?.connected}
+                size="small"
+              >
+                144.500 MHz
+              </Button>
+              <Button
+                onClick={() => handleSdrSetFrequency(430.000)}
+                disabled={!sdrStatus?.connected}
+                size="small"
+              >
+                430.000 MHz
+              </Button>
+              <Button
+                onClick={() => handleSdrSetFrequency(438.625)}
+                disabled={!sdrStatus?.connected}
+                size="small"
+              >
+                438.625 MHz
+              </Button>
+            </Space>
+            <Text type="secondary">将频率设置为与手台相同，常见对讲机频段：144MHz / 430MHz / 438.625MHz</Text>
+          </Space>
+        </Card>
+
+        {/* CTCSS 亚音设置 */}
+        <Card size="small">
+          <Title level={5} style={{ marginTop: 0 }}>CTCSS 亚音设置</Title>
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Space align="center">
+              <Text style={{ width: 100 }}>亚音频率:</Text>
+              <Select
+                style={{ width: 150 }}
+                value={sdrConfig.ctcss_tone === 0 ? "none" : sdrConfig.ctcss_tone}
+                onChange={(val) => handleSdrSetCtcssTone(val === "none" ? 0 : parseFloat(val as string))}
+                disabled={!sdrStatus?.connected}
+              >
+                <Select.Option value="none">不使用</Select.Option>
+                <Select.Option value={67.0}>67.0 Hz</Select.Option>
+                <Select.Option value={71.9}>71.9 Hz</Select.Option>
+                <Select.Option value={74.4}>74.4 Hz</Select.Option>
+                <Select.Option value={77.0}>77.0 Hz</Select.Option>
+                <Select.Option value={79.7}>79.7 Hz</Select.Option>
+                <Select.Option value={82.5}>82.5 Hz</Select.Option>
+                <Select.Option value={85.4}>85.4 Hz</Select.Option>
+                <Select.Option value={88.5}>88.5 Hz</Select.Option>
+                <Select.Option value={91.5}>91.5 Hz</Select.Option>
+                <Select.Option value={94.8}>94.8 Hz</Select.Option>
+                <Select.Option value={97.4}>97.4 Hz</Select.Option>
+                <Select.Option value={100.0}>100.0 Hz</Select.Option>
+                <Select.Option value={103.5}>103.5 Hz</Select.Option>
+                <Select.Option value={107.2}>107.2 Hz</Select.Option>
+                <Select.Option value={110.9}>110.9 Hz</Select.Option>
+                <Select.Option value={114.8}>114.8 Hz</Select.Option>
+                <Select.Option value={118.8}>118.8 Hz</Select.Option>
+                <Select.Option value={123.0}>123.0 Hz</Select.Option>
+                <Select.Option value={127.3}>127.3 Hz</Select.Option>
+                <Select.Option value={131.8}>131.8 Hz</Select.Option>
+                <Select.Option value={136.5}>136.5 Hz</Select.Option>
+                <Select.Option value={141.3}>141.3 Hz</Select.Option>
+                <Select.Option value={146.2}>146.2 Hz</Select.Option>
+                <Select.Option value={151.4}>151.4 Hz</Select.Option>
+                <Select.Option value={156.7}>156.7 Hz</Select.Option>
+                <Select.Option value={162.2}>162.2 Hz</Select.Option>
+                <Select.Option value={167.9}>167.9 Hz</Select.Option>
+                <Select.Option value={173.8}>173.8 Hz</Select.Option>
+                <Select.Option value={179.9}>179.9 Hz</Select.Option>
+                <Select.Option value={186.2}>186.2 Hz</Select.Option>
+                <Select.Option value={192.8}>192.8 Hz</Select.Option>
+                <Select.Option value={203.5}>203.5 Hz</Select.Option>
+                <Select.Option value={210.7}>210.7 Hz</Select.Option>
+                <Select.Option value={218.1}>218.1 Hz</Select.Option>
+                <Select.Option value={225.7}>225.7 Hz</Select.Option>
+                <Select.Option value={233.6}>233.6 Hz</Select.Option>
+                <Select.Option value={241.8}>241.8 Hz</Select.Option>
+                <Select.Option value={250.3}>250.3 Hz</Select.Option>
+              </Select>
+              <Text type="secondary">仅接收带有此亚音的信号，过滤干扰</Text>
+            </Space>
+            {sdrConfig.ctcss_tone > 0 && (
+              <>
+                <Space align="center">
+                  <Text style={{ width: 100 }}>检测门限:</Text>
+                  <Slider
+                    min={0.05}
+                    max={0.5}
+                    step={0.05}
+                    value={sdrConfig.ctcss_threshold}
+                    onChange={handleSdrSetCtcssThreshold}
+                    style={{ width: 200 }}
+                  />
+                  <Text>{sdrConfig.ctcss_threshold.toFixed(2)}</Text>
+                </Space>
+                {sdrStatus?.ctcss_detected !== undefined && (
+                  <div style={{ fontSize: 12, color: sdrStatus.ctcss_detected ? "green" : "#999" }}>
+                    CTCSS 检测状态: {sdrStatus.ctcss_detected ? "✅ 检测到亚音信号" : "⏳ 等待亚音信号..."}
+                    {sdrStatus.ctcss_strength > 0 && ` (强度: ${(sdrStatus.ctcss_strength * 100).toFixed(1)}%)`}
+                  </div>
+                )}
+              </>
+            )}
+            <Text type="secondary">CTCSS（连续语音控制静噪系统）用于在同一频率上区分不同用户组，只有发送方和接收方使用相同亚音频率时才能通信</Text>
+          </Space>
+        </Card>
+
+        {/* 步骤 3：运行设备（开始接收信号） */}
+        <Card
+          size="small"
+          styles={{ header: { background: wizardStep === 2 ? "#e6f7ff" : undefined } }}
+          title={
+            <Space>
+              <Tag color={sdrStatus?.streaming ? "success" : sdrStatus?.connected ? "processing" : "default"} style={{ margin: 0 }}>
+                {sdrStatus?.streaming ? "✓" : "3"}
+              </Tag>
+              <Text strong>运行设备</Text>
+              {sdrStatus?.connected && !sdrStatus?.streaming && <Tag color="blue">请操作</Tag>}
+              {sdrStatus?.streaming && <Tag color="green">运行中</Tag>}
+            </Space>
+          }
+        >
+          <Space direction="vertical" style={{ width: "100%" }}>
+            {!callTesting ? (
+              <>
+                <Text type="secondary">启动设备开始接收信号。音频通过选中设备播放，不触发语音识别。用于验证频率和信号是否正常。</Text>
+                <Button
+                  type="primary"
+                  icon={<AudioOutlined />}
+                  onClick={handleCallTestStart}
+                  disabled={!sdrStatus?.connected}
+                  block
+                >
+                  开始运行
+                </Button>
+                {lastTestSnapshot && (
+                  <div style={{ marginTop: 4 }}>
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      上次运行停止于 {lastTestSnapshot.stoppedAt.toLocaleTimeString()}
+                    </Text>
+                    <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f0f0f0", padding: "6px 8px", borderRadius: 4, lineHeight: 1.8, marginTop: 4 }}>
+                      <div>📡 IQ采样率: {lastTestSnapshot.status.debug_sample_rate?.toLocaleString() ?? "—"} Hz</div>
+                      <div>🔊 音频输出采样率: {lastTestSnapshot.status.debug_out_sample_rate?.toLocaleString() ?? "—"} Hz</div>
+                      <div>📊 最后队列长度: {lastTestSnapshot.status.debug_audio_queue_len ?? "—"} 样本</div>
+                      <div>🔧 解调模式: {lastTestSnapshot.status.demod_mode?.toUpperCase() ?? "—"} | PPM: {lastTestSnapshot.status.ppm_correction ?? 0}</div>
+                      <div>💻 增益: {lastTestSnapshot.status.gain_db ?? "—"} dB | 最后信号强度: {Math.min(100, Math.round(lastTestSnapshot.signal * 100))}%</div>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <Alert
+                  message="设备运行中"
+                  description={
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <span>请按下配对手台的 PTT 键进行说话，音频将通过【{sdrConfig.output_device || "默认输出设备"}】播放。</span>
+                      <Space wrap>
+                        <Badge status={sdrStatus?.vad_active ? "processing" : "default"} />
+                        <Text style={{ fontSize: 12 }}>{sdrStatus?.vad_active ? "正在接收信号..." : "等待信号"}</Text>
+                        <Text style={{ fontSize: 12 }}>|信号强度：{Math.min(100, Math.round(sdrSignal * 100))}%</Text>
+                      </Space>
+                      <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f5f5f5", padding: "6px 8px", borderRadius: 4, lineHeight: 1.8 }}>
+                        <div>📡 <b>接收频率:</b> {sdrStatus?.frequency_mhz?.toFixed(3) ?? "—"} MHz | IQ采样率: {sdrStatus?.debug_sample_rate?.toLocaleString() ?? "—"} Hz</div>
+                        <div>🔇 <b>CTCSS亚音:</b> {sdrStatus?.ctcss_tone && sdrStatus.ctcss_tone > 0 ? (
+                          <>
+                            {sdrStatus.ctcss_tone.toFixed(1)} Hz 
+                            <span style={{marginLeft: 8, color: sdrStatus.ctcss_detected ? 'green' : 'orange'}}>
+                              {sdrStatus.ctcss_detected ? `✅已检测 (强度${sdrStatus.ctcss_strength.toFixed(2)})` : '⏳检测中...'}
+                            </span>
+                          </>
+                        ) : "未启用"}</div>
+                        <div>🔊 音频输出采样率: {sdrStatus?.debug_out_sample_rate?.toLocaleString() ?? "—"} Hz | 队列长度: {sdrStatus?.debug_audio_queue_len ?? "—"} 样本</div>
+                        <div>🔧 解调模式: {sdrStatus?.demod_mode?.toUpperCase() ?? "—"} | PPM: {sdrStatus?.ppm_correction ?? 0} | VAD阈值: {sdrConfig.vad_threshold.toFixed(3)}</div>
+                        <div>💻 增益: {sdrStatus?.gain_db ?? "—"} dB | 音频流: {sdrStatus?.streaming ? "运行中" : "已停止"}</div>
+                        <div style={{borderTop: "1px solid #ddd", marginTop: 4, paddingTop: 4}}><b>🔬 DSP诊断</b></div>
+                        <div>IQ幅度范围: <b>{sdrStatus?.diag_iq_range?.toFixed(4) ?? "—"}</b>
+                          {" "}<span style={{color: (sdrStatus?.diag_iq_range ?? 0) > 0.05 ? "green" : (sdrStatus?.diag_iq_range ?? 0) > 0.01 ? "orange" : "red"}}>
+                            {(sdrStatus?.diag_iq_range ?? 0) > 0.1 ? "✅信号强" : (sdrStatus?.diag_iq_range ?? 0) > 0.02 ? "⚠️信号弱" : "❌无信号(频率偏差?)"}
+                          </span>
+                        </div>
+                        <div>IQ直流偏置(I): <b>{sdrStatus?.diag_iq_dc_i?.toFixed(4) ?? "—"}</b>
+                          {" "}<span style={{color: Math.abs(sdrStatus?.diag_iq_dc_i ?? 0) < 0.05 ? "green" : "orange"}}>
+                            {Math.abs(sdrStatus?.diag_iq_dc_i ?? 0) < 0.05 ? "✅正常" : "⚠️偏置大(需调PPM)"}
+                          </span>
+                        </div>
+                        <div>解调音频RMS: <b>{sdrStatus?.diag_audio_rms?.toFixed(5) ?? "—"}</b>
+                          {" "}<span style={{color: (sdrStatus?.diag_audio_rms ?? 0) > 0.005 ? "green" : (sdrStatus?.diag_audio_rms ?? 0) > 0.001 ? "orange" : "red"}}>
+                            {(sdrStatus?.diag_audio_rms ?? 0) > 0.01 ? "✅音频正常" : (sdrStatus?.diag_audio_rms ?? 0) > 0.001 ? "⚠️音频弱" : "❌音频异常(解调失败?)"}
+                          </span>
+                        </div>
+                      </div>
+                    </Space>
+                  }
+                  type="info"
+                  showIcon
+                />
+                <Button
+                  danger
+                  icon={<DisconnectOutlined />}
+                  onClick={handleCallTestStop}
+                  block
+                >
+                  结束运行
+                </Button>
+              </>
+            )}
+
+            {/* rtl_sdr 日志 */}
+            <div>
+              <Button size="small" onClick={handleViewRtlsdrLog}>
+                查看 rtl_sdr 进程日志
+              </Button>
+              {rtlsdrLogPath && <Text type="secondary" style={{ fontSize: 10, marginLeft: 8 }}>{rtlsdrLogPath}</Text>}
+              {rtlsdrLog !== null && (
+                <div style={{ marginTop: 6, fontFamily: "monospace", fontSize: 10, background: "#1a1a1a", color: "#0f0", padding: "8px", borderRadius: 4, maxHeight: 200, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                  {rtlsdrLog || "(日志为空，尚未连接设备)"}
+                </div>
+              )}
+            </div>
+          </Space>
+        </Card>
+
+        {/* 步骤 4：启用语音识别 */}
+        <Card
+          size="small"
+          styles={{ header: { background: wizardStep === 3 ? "#f6ffed" : undefined } }}
+          title={
+            <Space>
+              <Tag color={sdrConfig.input_source === "sdr" ? "success" : "default"} style={{ margin: 0 }}>
+                {sdrConfig.input_source === "sdr" ? "✓" : "4"}
+              </Tag>
+              <Text strong>启用 SDR 语音识别</Text>
+              {sdrStatus?.streaming && sdrConfig.input_source !== "sdr" && <Tag color="blue">请操作</Tag>}
+              {sdrConfig.input_source === "sdr" && <Tag color="green">识别中</Tag>}
+            </Space>
+          }
+        >
+          {sdrConfig.input_source !== "sdr" ? (
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <Text type="secondary">切换语音输入源为 SDR，设备接收信号后自动识别并输出文字。热键在 SDR 模式下不起作用。</Text>
+              <Button
+                type="primary"
+                icon={<SignalFilled />}
+                onClick={() => handleInputSourceChange("sdr")}
+                disabled={!sdrStatus?.streaming}
+              >
+                切换为 SDR 语音输入
+              </Button>
+            </Space>
+          ) : (
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <Alert
+                message="SDR 语音识别已启用"
+                description="按手台 PTT 说话，SDR 接收到信号后自动识别并输出文字到光标位置。"
+                type="success"
+                showIcon
+              />
+              <Button
+                icon={<AudioOutlined />}
+                onClick={() => handleInputSourceChange("microphone")}
+                size="small"
+              >
+                切换回麦克风
+              </Button>
+            </Space>
+          )}
+        </Card>
+
+        {/* 高级设置折叠区 */}
+        <div>
+          <Button
+            type="link"
+            style={{ padding: 0, fontSize: 13 }}
+            onClick={() => setShowSdrAdvanced(v => !v)}
+          >
+            {showSdrAdvanced ? "▲ 收起高级设置" : "▼ 展开高级设置"}
+          </Button>
+        </div>
+
+        {showSdrAdvanced && (
+          <Space direction="vertical" style={{ width: "100%" }} size="middle">
+            {/* 增益设置 */}
+            <Card size="small">
+              <Title level={5} style={{ marginTop: 0 }}>增益设置</Title>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Switch
+                  checked={sdrConfig.auto_gain}
+                  onChange={handleSdrSetAutoGain}
+                  disabled={!sdrStatus?.connected}
+                  checkedChildren="自动增益"
+                  unCheckedChildren="手动增益"
+                />
+                {!sdrConfig.auto_gain && (
+                  <Space>
+                    <Text>增益:</Text>
+                    <Slider
+                      min={0}
+                      max={40}
+                      value={sdrConfig.gain_db}
+                      onChange={handleSdrSetGain}
+                      disabled={!sdrStatus?.connected}
+                      style={{ width: 200 }}
+                    />
+                    <Text>{sdrConfig.gain_db} dB</Text>
+                  </Space>
+                )}
+                <Text type="secondary">
+                  增益控制接收信号的放大程度。增益过低信号微弱难以识别；增益过高会引入噪声导致误触发。建议从自动增益开始，信号不稳定时再手动调整（典型值 20–35 dB）。
+                </Text>
+              </Space>
+            </Card>
+
+            {/* 虚拟音频输出设备 */}
+            <Card size="small">
+              <Title level={5} style={{ marginTop: 0 }}>音频输出设备</Title>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Select
+                  style={{ width: 300 }}
+                  placeholder="选择音频输出设备（可选）"
+                  value={sdrConfig.output_device || undefined}
+                  onChange={handleSdrSetOutputDevice}
+                  allowClear
+                  dropdownRender={(menu) => (
+                    <>
+                      {menu}
+                      <div style={{ padding: "4px 8px", borderTop: "1px solid #f0f0f0" }}>
+                        <Button type="link" icon={<ReloadOutlined />} size="small" onClick={loadSdrData}>
+                          刷新设备列表
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                >
+                  {sdrAllDevices.map((device) => (
+                    <Select.Option key={device} value={device}>
+                      {device}
+                    </Select.Option>
+                  ))}
+                </Select>
+                <Text type="secondary">SDR解调音频同步输出至此设备（可用于监听），不影响ASR识别</Text>
+              </Space>
+            </Card>
+
+            {/* 解调模式 */}
+            <Card size="small">
+              <Title level={5} style={{ marginTop: 0 }}>解调模式</Title>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Radio.Group
+                  value={sdrConfig.demod_mode}
+                  onChange={(e) => handleSdrSetDemodMode(e.target.value)}
+                  buttonStyle="solid"
+                >
+                  {DEMOD_OPTIONS.map(opt => (
+                    <Tooltip key={opt.value} title={opt.desc}>
+                      <Radio.Button value={opt.value}>{opt.label}</Radio.Button>
+                    </Tooltip>
+                  ))}
+                </Radio.Group>
+                <Text type="secondary">
+                  {DEMOD_OPTIONS.find(o => o.value === sdrConfig.demod_mode)?.desc}
+                </Text>
+              </Space>
+            </Card>
+
+            {/* PPM校正 + VAD阈值 */}
+            <Card size="small">
+              <Title level={5} style={{ marginTop: 0 }}>信号校正参数</Title>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Space align="center">
+                  <Text style={{ width: 100 }}>PPM频率校正:</Text>
+                  <InputNumber
+                    min={-50}
+                    max={50}
+                    step={1}
+                    value={sdrConfig.ppm_correction}
+                    onChange={(val) => val !== null && handleSdrSetPpm(val)}
+                    addonAfter="ppm"
+                    style={{ width: 160 }}
+                  />
+                  <Text type="secondary">补偿晶振误差（默认0，典型值±20）</Text>
+                </Space>
+                <Space align="center">
+                  <Text style={{ width: 100 }}>VAD检测阈值:</Text>
+                  <Slider
+                    min={0.001}
+                    max={0.1}
+                    step={0.001}
+                    value={sdrConfig.vad_threshold}
+                    onChange={handleSdrSetVadThreshold}
+                    style={{ width: 200 }}
+                  />
+                  <Text>{sdrConfig.vad_threshold.toFixed(3)}</Text>
+                </Space>
+                <Text type="secondary">VAD阈值越小越灵敏，若误触发可适当调大</Text>
+              </Space>
+            </Card>
+          </Space>
+        )}
+      </Space>
+    );
+  };
+
   // 根据 activeTab 渲染对应内容
   const renderContent = () => {
     switch (activeTab) {
@@ -887,6 +1906,8 @@ function Settings({ activeTab }: SettingsProps) {
         return renderCommandContent();
       case "llm":
         return renderLlmContent();
+      case "sdr":
+        return renderSdrContent();
       default:
         return renderGeneralContent();
     }

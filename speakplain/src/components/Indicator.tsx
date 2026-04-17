@@ -25,6 +25,9 @@ function Indicator() {
   const micStreamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
   const waveHistoryRef = useRef<number[]>(Array(BAR_COUNT).fill(0));
+  // SDR 模式：由后端信号值直接驱动波形，无需 getUserMedia
+  const sdrSignalRef = useRef<number>(0);   // 最新收到的信号强度
+  const sdrModeRef = useRef<boolean>(false); // 是否处于 SDR 驱动模式
   // 计时器
   const startTimer = () => {
     setElapsed(0);
@@ -44,10 +47,71 @@ function Indicator() {
     if (procTimerRef.current) { clearInterval(procTimerRef.current); procTimerRef.current = null; }
   };
 
-  // 波形绘制
+  // 波形绘制（核心 draw 循环，同时支持麦克风和 SDR 两种数据源）
+  const drawLoop = () => {
+    const COLS = 50;
+    const doFrame = () => {
+      rafRef.current = requestAnimationFrame(doFrame);
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const dpr = window.devicePixelRatio || 1;
+      const cw = canvas.offsetWidth * dpr;
+      const ch = canvas.offsetHeight * dpr;
+      if (canvas.width !== cw || canvas.height !== ch) {
+        canvas.width = cw;
+        canvas.height = ch;
+      }
+      const w = canvas.width, h = canvas.height;
+      const gfx = canvas.getContext("2d")!;
+
+      // 采样一帧数据
+      const hist = waveHistoryRef.current;
+      if (sdrModeRef.current) {
+        // SDR 模式：直接使用后端推送的信号值
+        hist.push(sdrSignalRef.current);
+      } else if (analyserRef.current) {
+        // 麦克风模式：Web Audio API 采样
+        const timeDomain = new Uint8Array(analyserRef.current.fftSize);
+        analyserRef.current.getByteTimeDomainData(timeDomain);
+        let sum = 0;
+        for (let i = 0; i < timeDomain.length; i++) {
+          const v = (timeDomain[i] - 128) / 128;
+          sum += v * v;
+        }
+        const rms = Math.sqrt(sum / timeDomain.length);
+        hist.push(Math.min(Math.pow(rms * 6, 0.65), 1.0));
+      } else {
+        hist.push(0);
+      }
+      if (hist.length > COLS) hist.shift();
+
+      // 绘制
+      gfx.clearRect(0, 0, w, h);
+      const gap = 1.5;
+      const barW = Math.max((w - gap * (COLS - 1)) / COLS, 1.5);
+      const cy = h / 2;
+      const waveColor = getComputedStyle(document.documentElement)
+        .getPropertyValue("--skin-wave-primary").trim() || "#3b6beb";
+      for (let i = 0; i < hist.length; i++) {
+        const x = i * (barW + gap);
+        const bh = Math.max(hist[i] * h * 0.9, 2);
+        const alpha = 0.35 + 0.65 * (i / COLS);
+        gfx.globalAlpha = alpha;
+        gfx.fillStyle = waveColor;
+        gfx.beginPath();
+        const r = Math.min(barW / 2, 2);
+        gfx.roundRect(x, cy - bh / 2, barW, bh, r);
+        gfx.fill();
+      }
+      gfx.globalAlpha = 1;
+    };
+    waveHistoryRef.current = Array(COLS).fill(0);
+    doFrame();
+  };
+
   const startWaveform = async () => {
-    // 已在运行则不重复启动
     if (rafRef.current) return;
+    sdrModeRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
       micStreamRef.current = stream;
@@ -58,67 +122,17 @@ function Indicator() {
       analyser.smoothingTimeConstant = 0.3;
       analyserRef.current = analyser;
       ctx.createMediaStreamSource(stream).connect(analyser);
-
-      const COLS = 50;
-      waveHistoryRef.current = Array(COLS).fill(0);
-      const timeDomain = new Uint8Array(analyser.fftSize);
-      let lastSample = 0;
-
-      const draw = () => {
-        rafRef.current = requestAnimationFrame(draw);
-        const canvas = canvasRef.current;
-        if (!canvas) return;
-        const dpr = window.devicePixelRatio || 1;
-        const cw = canvas.offsetWidth * dpr;
-        const ch = canvas.offsetHeight * dpr;
-        if (canvas.width !== cw || canvas.height !== ch) {
-          canvas.width = cw;
-          canvas.height = ch;
-        }
-        const w = canvas.width, h = canvas.height;
-        const gfx = canvas.getContext("2d")!;
-        const now = performance.now();
-        if (now - lastSample > 40) {
-          lastSample = now;
-          analyser.getByteTimeDomainData(timeDomain);
-          let sum = 0;
-          for (let i = 0; i < timeDomain.length; i++) {
-            const v = (timeDomain[i] - 128) / 128;
-            sum += v * v;
-          }
-          const rms = Math.sqrt(sum / timeDomain.length);
-          const val = Math.min(Math.pow(rms * 6, 0.65), 1.0);
-          const hist = waveHistoryRef.current;
-          hist.push(val);
-          if (hist.length > COLS) hist.shift();
-        }
-        gfx.clearRect(0, 0, w, h);
-        const hist = waveHistoryRef.current;
-        const gap = 1.5;
-        const barW = Math.max((w - gap * (COLS - 1)) / COLS, 1.5);
-        const cy = h / 2;
-        const minH = 2;
-        // 从 CSS 变量读取皮肤波形颜色
-        const waveColor = getComputedStyle(document.documentElement)
-          .getPropertyValue("--skin-wave-primary").trim() || "#3b6beb";
-        for (let i = 0; i < hist.length; i++) {
-          const x = i * (barW + gap);
-          const bh = Math.max(hist[i] * h * 0.9, minH);
-          const alpha = 0.35 + 0.65 * (i / COLS);
-          gfx.globalAlpha = alpha;
-          gfx.fillStyle = waveColor;
-          gfx.beginPath();
-          const r = Math.min(barW / 2, 2);
-          gfx.roundRect(x, cy - bh / 2, barW, bh, r);
-          gfx.fill();
-        }
-        gfx.globalAlpha = 1;
-      };
-      draw();
-    } catch (_e) {
-    }
+    } catch (_e) {}
+    drawLoop();
   };
 
+  // SDR 模式启动：不申请麦克风，直接用信号值驱动波形
+  const startSdrWaveform = () => {
+    if (rafRef.current) return;
+    sdrModeRef.current = true;
+    sdrSignalRef.current = 0;
+    drawLoop();
+  };
   const stopWaveform = () => {
     if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
     if (audioCtxRef.current) { audioCtxRef.current.close(); audioCtxRef.current = null; }
@@ -164,6 +178,21 @@ function Indicator() {
       emit("indicator:request_skin").catch(() => {});
     }, 100);
 
+    // 监听 indicator:volume 事件——麦克风和 SDR 均通过此事件推送信号强度
+    const unlistenVolume = listen<number>("indicator:volume", (event) => {
+      const vol = event.payload;
+      sdrSignalRef.current = vol;
+      // 如果正在录音且还未启动 SDR 波形，自动切换
+      if (currentlyRecording && !rafRef.current) {
+        stopWaveform();
+        startSdrWaveform();
+      } else if (currentlyRecording && !sdrModeRef.current) {
+        // 当前在麦克风波形模式，切换到 SDR 模式
+        stopWaveform();
+        startSdrWaveform();
+      }
+    });
+
     // 记录当前是否处于录音状态（用于处理重复事件）
     let currentlyRecording = false;
 
@@ -176,10 +205,17 @@ function Indicator() {
       if (nowRecording && !currentlyRecording) {
         currentlyRecording = true;
         startTimer();
-        startWaveform();
+        // SDR 模式检测：如果已有信号回调在推送，用 SDR 波形；否则用麦克风
+        if (sdrSignalRef.current > 0 || sdrModeRef.current) {
+          startSdrWaveform();
+        } else {
+          startWaveform();
+        }
       } else if (nowRecording && currentlyRecording) {
         if (!timerRef.current) startTimer();
-        if (!rafRef.current) startWaveform();
+        if (!rafRef.current) {
+          if (sdrModeRef.current) startSdrWaveform(); else startWaveform();
+        }
       } else if (!nowRecording && currentlyRecording) {
         currentlyRecording = false;
         stopTimer();
@@ -199,6 +235,7 @@ function Indicator() {
       stopProcTimer();
       stopWaveform();
       unlistenStatus.then((f) => f());
+      unlistenVolume.then((f) => f());
       unlistenSkin.then((f) => f());
       unsubscribe();
     };

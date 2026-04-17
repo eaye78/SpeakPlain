@@ -2,6 +2,7 @@
 use serde::{Serialize, Deserialize};
 use crate::storage::Storage;
 use crate::hotkey::key_codes;
+use crate::sdr::InputSource;
 
 /// 修饰键类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +82,20 @@ pub struct AppConfig {
     // 指令模式配置
     pub command_mode_enabled: bool,   // 指令模式开关
     pub command_mappings: Vec<CommandMapping>, // 指令映射列表
+
+    // SDR设备配置
+    pub sdr_enabled: bool,            // SDR功能开关
+    pub sdr_device_index: Option<u32>, // SDR设备索引
+    pub sdr_frequency_mhz: f64,       // SDR接收频率(MHz)
+    pub sdr_gain_db: i32,             // SDR增益(dB)
+    pub sdr_auto_gain: bool,          // SDR自动增益
+    pub sdr_output_device: String,    // SDR输出设备
+    pub sdr_input_source: InputSource, // 输入源选择
+    pub sdr_demod_mode: crate::sdr::DemodMode, // 解调模式
+    pub sdr_ppm_correction: i32,      // PPM频率校正
+    pub sdr_vad_threshold: f32,       // VAD阈值
+    pub sdr_ctcss_tone: f32,          // CTCSS亚音频频率(Hz)，0表示禁用
+    pub sdr_ctcss_threshold: f32,     // CTCSS检测门限
 }
 
 impl Default for AppConfig {
@@ -125,6 +140,18 @@ impl Default for AppConfig {
                     modifier: ModifierKey::None,
                 },
             ],
+            sdr_enabled: false,
+            sdr_device_index: None,
+            sdr_frequency_mhz: 461.025,
+            sdr_gain_db: 30,
+            sdr_auto_gain: false,
+            sdr_output_device: String::new(),
+            sdr_input_source: InputSource::Microphone,
+            sdr_demod_mode: crate::sdr::DemodMode::Nbfm,
+            sdr_ppm_correction: 0,
+            sdr_vad_threshold: 0.01,
+            sdr_ctcss_tone: 0.0,
+            sdr_ctcss_threshold: 0.15,
         }
     }
 }
@@ -258,6 +285,62 @@ impl AppConfig {
             }
         }
 
+        // 加载SDR配置
+        if let Ok(Some(value)) = storage.get_setting("sdr_enabled") {
+            config.sdr_enabled = value == "true";
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_device_index") {
+            if let Ok(idx) = value.parse::<u32>() {
+                config.sdr_device_index = Some(idx);
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_frequency_mhz") {
+            if let Ok(freq) = value.parse::<f64>() {
+                config.sdr_frequency_mhz = freq;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_gain_db") {
+            if let Ok(gain) = value.parse::<i32>() {
+                config.sdr_gain_db = gain;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_auto_gain") {
+            config.sdr_auto_gain = value == "true";
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_output_device") {
+            config.sdr_output_device = value;
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_input_source") {
+            if let Ok(source) = serde_json::from_str::<InputSource>(&value) {
+                config.sdr_input_source = source;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_demod_mode") {
+            if let Ok(mode) = serde_json::from_str::<crate::sdr::DemodMode>(&value) {
+                config.sdr_demod_mode = mode;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_ppm_correction") {
+            if let Ok(ppm) = value.parse::<i32>() {
+                config.sdr_ppm_correction = ppm;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_vad_threshold") {
+            if let Ok(th) = value.parse::<f32>() {
+                config.sdr_vad_threshold = th;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_ctcss_tone") {
+            if let Ok(tone) = value.parse::<f32>() {
+                config.sdr_ctcss_tone = tone;
+            }
+        }
+        if let Ok(Some(value)) = storage.get_setting("sdr_ctcss_threshold") {
+            if let Ok(th) = value.parse::<f32>() {
+                config.sdr_ctcss_threshold = th;
+            }
+        }
+
         Ok(config)
     }
     
@@ -288,6 +371,20 @@ impl AppConfig {
         storage.set_setting("llm_provider_id", &self.llm_provider_id)?;
         storage.set_setting("command_mode_enabled", &self.command_mode_enabled.to_string())?;
         storage.set_setting("command_mappings", &serde_json::to_string(&self.command_mappings)?)?;
+
+        // 保存SDR配置
+        storage.set_setting("sdr_enabled", &self.sdr_enabled.to_string())?;
+        storage.set_setting("sdr_device_index", &self.sdr_device_index.map(|i| i.to_string()).unwrap_or_default())?;
+        storage.set_setting("sdr_frequency_mhz", &self.sdr_frequency_mhz.to_string())?;
+        storage.set_setting("sdr_gain_db", &self.sdr_gain_db.to_string())?;
+        storage.set_setting("sdr_auto_gain", &self.sdr_auto_gain.to_string())?;
+        storage.set_setting("sdr_output_device", &self.sdr_output_device)?;
+        storage.set_setting("sdr_input_source", &serde_json::to_string(&self.sdr_input_source)?)?;
+        storage.set_setting("sdr_demod_mode", &serde_json::to_string(&self.sdr_demod_mode)?)?;
+        storage.set_setting("sdr_ppm_correction", &self.sdr_ppm_correction.to_string())?;
+        storage.set_setting("sdr_vad_threshold", &self.sdr_vad_threshold.to_string())?;
+        storage.set_setting("sdr_ctcss_tone", &self.sdr_ctcss_tone.to_string())?;
+        storage.set_setting("sdr_ctcss_threshold", &self.sdr_ctcss_threshold.to_string())?;
 
         Ok(())
     }
