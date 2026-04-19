@@ -14,6 +14,7 @@ mod tray;
 mod llm;
 mod command;
 mod sdr;
+mod sdr_core;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1080,6 +1081,16 @@ async fn sdr_set_ctcss_threshold(state: State<'_, AppState>, threshold: f32) -> 
     Ok(())
 }
 
+/// 设置SDR带宽
+#[tauri::command]
+async fn sdr_set_bandwidth(state: State<'_, AppState>, bandwidth: u32) -> Result<(), String> {
+    state.sdr_manager.lock().set_bandwidth(bandwidth).map_err(|e| e.to_string())?;
+    let mut cfg = state.config.lock();
+    cfg.sdr_bandwidth = bandwidth;
+    let _ = cfg.save(&*state.storage.lock());
+    Ok(())
+}
+
 /// 获取SDR设备状态
 #[tauri::command]
 async fn sdr_get_status(state: State<'_, AppState>) -> Result<sdr::SdrStatus, String> {
@@ -1124,34 +1135,6 @@ async fn sdr_stop_stream(state: State<'_, AppState>) -> Result<(), String> {
 #[tauri::command]
 async fn sdr_test_connection(state: State<'_, AppState>) -> Result<sdr::TestResult, String> {
     state.sdr_manager.lock().test_connection().map_err(|e| e.to_string())
-}
-
-/// 通话测试：自动连接设备、启动音频流、仅播放音频，不触发 ASR
-#[tauri::command]
-async fn sdr_call_test_start(state: State<'_, AppState>, device_index: u32) -> Result<(), String> {
-    // 标记进入通话测试模式
-    state.sdr_manager.lock().call_test_mode.store(true, std::sync::atomic::Ordering::Relaxed);
-    // 若未连接则先连接
-    let connected = state.sdr_manager.lock().get_status().connected;
-    if !connected {
-        state.sdr_manager.lock().connect(device_index).map_err(|e| e.to_string())?;
-    }
-    // 若流未启动则启动
-    let streaming = state.sdr_manager.lock().get_status().streaming;
-    if !streaming {
-        state.sdr_manager.lock().start_stream().map_err(|e| e.to_string())?;
-    }
-    log::info!("SDR通话测试已启动，设备索引={}", device_index);
-    Ok(())
-}
-
-/// 停止通话测试
-#[tauri::command]
-async fn sdr_call_test_stop(state: State<'_, AppState>) -> Result<(), String> {
-    state.sdr_manager.lock().call_test_mode.store(false, std::sync::atomic::Ordering::Relaxed);
-    state.sdr_manager.lock().stop_stream().map_err(|e| e.to_string())?;
-    log::info!("SDR通话测试已停止");
-    Ok(())
 }
 
 /// 获取SDR音频缓冲并送入ASR识别
@@ -1304,16 +1287,25 @@ async fn sdr_launch_zadig(app_handle: AppHandle) -> Result<(), String> {
     info!("启动 Zadig: {}", zadig_path.display());
 
     // 以管理员权限启动 Zadig（-Wait 使 PowerShell 等待 Zadig 退出后才返回）
-    let status = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            &format!(
-                "Start-Process -FilePath '{}' -Verb RunAs -Wait",
-                zadig_path.to_string_lossy()
-            ),
-        ])
-        .status()
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    
+    let mut cmd = std::process::Command::new("powershell");
+    cmd.args([
+        "-NoProfile",
+        "-WindowStyle", "Hidden",
+        "-Command",
+        &format!(
+            "Start-Process -FilePath '{}' -Verb RunAs -Wait -WindowStyle Hidden",
+            zadig_path.to_string_lossy()
+        ),
+    ]);
+    
+    // Windows: 隐藏控制台窗口
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    
+    let status = cmd.status()
         .map_err(|e| format!("启动失败: {}", e))?;
 
     if status.success() {
@@ -1325,7 +1317,52 @@ async fn sdr_launch_zadig(app_handle: AppHandle) -> Result<(), String> {
 }
 
 fn main() {
-    env_logger::init();
+    // 设置 UTF-8 编码以正确显示中文
+    #[cfg(windows)]
+    unsafe {
+        use windows::Win32::System::Console::*;
+        
+        // 设置控制台输入/输出代码页为 UTF-8 (65001)
+        let _ = SetConsoleCP(65001);
+        let _ = SetConsoleOutputCP(65001);
+        
+        // 启用 ANSI 转义序列支持
+        let handle = GetStdHandle(STD_OUTPUT_HANDLE);
+        if let Ok(handle) = handle {
+            let mut mode = CONSOLE_MODE(0);
+            if GetConsoleMode(handle, &mut mode).is_ok() {
+                mode.0 |= ENABLE_VIRTUAL_TERMINAL_PROCESSING.0;
+                let _ = SetConsoleMode(handle, mode);
+            }
+        }
+        
+        // 设置 stderr 编码为 UTF-8（用于日志输出）
+        let stderr_handle = GetStdHandle(STD_ERROR_HANDLE);
+        if let Ok(handle) = stderr_handle {
+            let mut mode = CONSOLE_MODE(0);
+            if GetConsoleMode(handle, &mut mode).is_ok() {
+                mode.0 |= ENABLE_VIRTUAL_TERMINAL_PROCESSING.0;
+                let _ = SetConsoleMode(handle, mode);
+            }
+        }
+    }
+    
+    // 使用自定义格式初始化日志，确保 UTF-8 输出到 stdout
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+        .format(|buf, record| {
+            use std::io::Write;
+            let timestamp = chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f");
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                timestamp,
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .target(env_logger::Target::Stdout)
+        .init();
 
     // 提前创建共享状态，供 Builder 阶段的 with_handler 闭包引用
     let hk_is_active    = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1586,6 +1623,7 @@ fn main() {
             sdr_set_vad_threshold,
             sdr_set_ctcss_tone,
             sdr_set_ctcss_threshold,
+            sdr_set_bandwidth,
             sdr_get_status,
             sdr_get_signal_strength,
             sdr_get_virtual_devices,
@@ -1594,8 +1632,6 @@ fn main() {
             sdr_start_stream,
             sdr_stop_stream,
             sdr_test_connection,
-            sdr_call_test_start,
-            sdr_call_test_stop,
             sdr_trigger_asr,
             sdr_get_rtlsdr_log,
             sdr_get_rtlsdr_log_path,

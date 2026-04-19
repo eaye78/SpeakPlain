@@ -8,6 +8,12 @@ repository = ""
 edition = "2021"
 rust-version = "1.75"
 
+# Windows 子系统设置：windows_subsystem 防止弹出命令行窗口
+# 使用 build.rs 动态设置子系统，调试模式显示控制台，发布模式隐藏
+[[bin]]
+name = "speakplain"
+path = "src/main.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -42,7 +48,7 @@ serde_json = "1.0"
 # Input Simulation
 enigo = "0.2"
 arboard = "3.3"
-windows = { version = "0.52", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.52", features = ["Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_Console", "Win32_Foundation"] }
 
 # HTTP client for LLM API calls
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
@@ -68,7 +74,8 @@ base64 = "0.22"
 realfft = "3"
 mel_filter = "0.1"
 
-# SDR Support - 通过 rtl_tcp.exe 子进程读取 IQ 数据，无需外部魔数库
+# SDR Support - 使用 rust-rtlsdr crate 直接调用 librtlsdr 库
+rtlsdr = "0.1"
 
 
 

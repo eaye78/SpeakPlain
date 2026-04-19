@@ -1,4 +1,13 @@
 fn main() {
+    // Windows 子系统设置：调试模式显示控制台，发布模式隐藏
+    #[cfg(windows)]
+    {
+        if std::env::var("PROFILE").unwrap_or_default() == "release" {
+            println!("cargo:rustc-link-arg=/SUBSYSTEM:WINDOWS");
+            println!("cargo:rustc-link-arg=/ENTRY:mainCRTStartup");
+        }
+    }
+    
     let sdr_arch = if cfg!(target_pointer_width = "64") { "x64" } else { "x86" };
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
@@ -8,6 +17,10 @@ fn main() {
         .unwrap()
         .join("sdr")
         .join(sdr_arch);
+
+    // 链接 rtlsdr.lib（用于 rtlsdr crate）
+    println!("cargo:rustc-link-search=native={}", sdr_dir.display());
+    println!("cargo:rustc-link-lib=dylib=rtlsdr");
 
     // .exe 目录： OUT_DIR 上溯三级
     let out_dir = std::env::var("OUT_DIR").unwrap();

@@ -4233,6 +4233,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtlsdr"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "136ba5e46b0edd188e277916fed8f5a7f6810622ec49e03831244f79c7cdfb3e"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "rubato"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4828,6 +4837,7 @@ dependencies = [
  "parking_lot",
  "realfft",
  "reqwest 0.12.28",
+ "rtlsdr",
  "rubato",
  "rusqlite",
  "serde",

@@ -199,7 +199,6 @@ interface SdrStatus {
   debug_sample_rate: number;
   debug_out_sample_rate: number;
   debug_audio_queue_len: number;
-  debug_call_test_mode: boolean;
   diag_audio_rms: number;
   diag_iq_range: number;
   diag_iq_dc_i: number;
@@ -225,11 +224,12 @@ interface SdrConfig {
   vad_threshold: number;
   ctcss_tone: number;
   ctcss_threshold: number;
+  bandwidth: number;  // SDR带宽(Hz)，默认150000匹配SDR++
 }
 
 const DEMOD_OPTIONS: { value: DemodMode; label: string; desc: string }[] = [
-  { value: "nbfm", label: "NBFM", desc: "窄带调频（对讲机/业余，推荐）" },
-  { value: "wbfm", label: "WBFM", desc: "宽带调频（FM广播）" },
+  { value: "wbfm", label: "WBFM", desc: "宽带调频（FM广播/对讲机，推荐）" },
+  { value: "nbfm", label: "NBFM", desc: "窄带调频（业余无线电）" },
   { value: "am",   label: "AM",   desc: "调幅（航空/短波）" },
   { value: "usb",  label: "USB",  desc: "上边带单边带" },
   { value: "lsb",  label: "LSB",  desc: "下边带单边带" },
@@ -279,24 +279,23 @@ function Settings({ activeTab }: SettingsProps) {
   const [sdrStatus, setSdrStatus] = useState<SdrStatus | null>(null);
   const [sdrConfig, setSdrConfig] = useState<SdrConfig>({
     enabled: false,
-    frequency_mhz: 144.5,
-    gain_db: 30,
-    auto_gain: false,
+    frequency_mhz: 438.625,  // 匹配SDR++截图频率
+    gain_db: 6,              // 匹配SDR++截图增益（降低避免饱和）
+    auto_gain: true,          // 启用自动增益避免信号过强
     output_device: "",
     input_source: "microphone",
-    demod_mode: "nbfm",
+    demod_mode: "wbfm",      // 匹配SDR++截图WFM模式
     ppm_correction: 0,
     vad_threshold: 0.01,
-    ctcss_tone: 0,
-    ctcss_threshold: 0.15,
+    ctcss_tone: 85.4,        // 匹配SDR++截图CTCSS
+    ctcss_threshold: 0.005,  // 降低门限到0.5%以检测WFM中的CTCSS
+    bandwidth: 150000,       // 匹配SDR++带宽150kHz
   });
   const [sdrLoading, setSdrLoading] = useState(false);
   const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<number | null>(null);
   const [sdrSignal, setSdrSignal] = useState(0);
   const [zadigLoading, setZadigLoading] = useState(false);
-  const [callTesting, setCallTesting] = useState(false);
   const [showSdrAdvanced, setShowSdrAdvanced] = useState(false);
-  const [lastTestSnapshot, setLastTestSnapshot] = useState<{ status: SdrStatus; signal: number; stoppedAt: Date } | null>(null);
   const [rtlsdrLog, setRtlsdrLog] = useState<string | null>(null);
   const [rtlsdrLogPath, setRtlsdrLogPath] = useState<string>("");
   const sdrSignalTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -1183,6 +1182,15 @@ function Settings({ activeTab }: SettingsProps) {
     }
   };
 
+  const handleSdrSetBandwidth = async (bandwidth: number) => {
+    try {
+      await invoke("sdr_set_bandwidth", { bandwidth });
+      setSdrConfig(prev => ({ ...prev, bandwidth }));
+    } catch (err: any) {
+      message.error("设置带宽失败: " + err);
+    }
+  };
+
   const handleSdrSetOutputDevice = async (device: string) => {
     try {
       await invoke("sdr_set_output_device", { deviceName: device });
@@ -1223,55 +1231,6 @@ function Settings({ activeTab }: SettingsProps) {
       await loadSdrData();
     } catch (err: any) {
       message.error("停止接收失败: " + err);
-    }
-  };
-
-  const handleCallTestStart = async () => {
-    if (selectedDeviceIndex === null) {
-      message.warning("请先选择SDR设备");
-      return;
-    }
-    // 重置上次快照，开始新一轮测试
-    setLastTestSnapshot(null);
-    setCallTesting(true);
-    try {
-      await invoke("sdr_call_test_start", { deviceIndex: selectedDeviceIndex });
-      message.success("通话测试已开始，请按下手台PTT话务");  
-      await loadSdrData();
-      // 启动信号强度轮询
-      if (sdrSignalTimerRef.current) clearInterval(sdrSignalTimerRef.current);
-      const timer = setInterval(async () => {
-        try {
-          const [strength, status] = await Promise.all([
-            invoke<number>("sdr_get_signal_strength"),
-            invoke<SdrStatus>("sdr_get_status"),
-          ]);
-          setSdrSignal(strength);
-          setSdrStatus(status);
-        } catch {}
-      }, 300);
-      sdrSignalTimerRef.current = timer;
-    } catch (err: any) {
-      setCallTesting(false);
-      message.error("通话测试失败: " + err);
-    }
-  };
-
-  const handleCallTestStop = async () => {
-    try {
-      await invoke("sdr_call_test_stop");
-      if (sdrSignalTimerRef.current) { clearInterval(sdrSignalTimerRef.current); sdrSignalTimerRef.current = null; }
-      // 保存当前状态快照，供停止后继续展示调试信息
-      setSdrStatus(prev => {
-        if (prev) setLastTestSnapshot({ status: prev, signal: sdrSignal, stoppedAt: new Date() });
-        return prev;
-      });
-      message.success("通话测试已停止");
-      await loadSdrData();
-    } catch (err: any) {
-      message.error("停止失败: " + err);
-    } finally {
-      setCallTesting(false);
     }
   };
 
@@ -1580,18 +1539,18 @@ function Settings({ activeTab }: SettingsProps) {
                 <Space align="center">
                   <Text style={{ width: 100 }}>检测门限:</Text>
                   <Slider
-                    min={0.05}
+                    min={0.001}
                     max={0.5}
-                    step={0.05}
+                    step={0.001}
                     value={sdrConfig.ctcss_threshold}
                     onChange={handleSdrSetCtcssThreshold}
                     style={{ width: 200 }}
                   />
-                  <Text>{sdrConfig.ctcss_threshold.toFixed(2)}</Text>
+                  <Text>{sdrConfig.ctcss_threshold.toFixed(3)}</Text>
                 </Space>
                 {sdrStatus?.ctcss_detected !== undefined && (
                   <div style={{ fontSize: 12, color: sdrStatus.ctcss_detected ? "green" : "#999" }}>
-                    CTCSS 检测状态: {sdrStatus.ctcss_detected ? "✅ 检测到亚音信号" : "⏳ 等待亚音信号..."}
+                    CTCSS 检测状态: {sdrStatus.ctcss_detected ? "🟢 检测到亚音信号" : "🔴 未检测到亚音信号"}
                     {sdrStatus.ctcss_strength > 0 && ` (强度: ${(sdrStatus.ctcss_strength * 100).toFixed(1)}%)`}
                   </div>
                 )}
@@ -1617,32 +1576,18 @@ function Settings({ activeTab }: SettingsProps) {
           }
         >
           <Space direction="vertical" style={{ width: "100%" }}>
-            {!callTesting ? (
+            {!sdrStatus?.streaming ? (
               <>
-                <Text type="secondary">启动设备开始接收信号。音频通过选中设备播放，不触发语音识别。用于验证频率和信号是否正常。</Text>
+                <Text type="secondary">启动设备开始接收信号。按下手台PTT键后自动检测语音并播放音频。</Text>
                 <Button
                   type="primary"
                   icon={<AudioOutlined />}
-                  onClick={handleCallTestStart}
+                  onClick={handleSdrStartStream}
                   disabled={!sdrStatus?.connected}
                   block
                 >
                   开始运行
                 </Button>
-                {lastTestSnapshot && (
-                  <div style={{ marginTop: 4 }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      上次运行停止于 {lastTestSnapshot.stoppedAt.toLocaleTimeString()}
-                    </Text>
-                    <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f0f0f0", padding: "6px 8px", borderRadius: 4, lineHeight: 1.8, marginTop: 4 }}>
-                      <div>📡 IQ采样率: {lastTestSnapshot.status.debug_sample_rate?.toLocaleString() ?? "—"} Hz</div>
-                      <div>🔊 音频输出采样率: {lastTestSnapshot.status.debug_out_sample_rate?.toLocaleString() ?? "—"} Hz</div>
-                      <div>📊 最后队列长度: {lastTestSnapshot.status.debug_audio_queue_len ?? "—"} 样本</div>
-                      <div>🔧 解调模式: {lastTestSnapshot.status.demod_mode?.toUpperCase() ?? "—"} | PPM: {lastTestSnapshot.status.ppm_correction ?? 0}</div>
-                      <div>💻 增益: {lastTestSnapshot.status.gain_db ?? "—"} dB | 最后信号强度: {Math.min(100, Math.round(lastTestSnapshot.signal * 100))}%</div>
-                    </div>
-                  </div>
-                )}
               </>
             ) : (
               <>
@@ -1650,7 +1595,7 @@ function Settings({ activeTab }: SettingsProps) {
                   message="设备运行中"
                   description={
                     <Space direction="vertical" size={4} style={{ width: "100%" }}>
-                      <span>请按下配对手台的 PTT 键进行说话，音频将通过【{sdrConfig.output_device || "默认输出设备"}】播放。</span>
+                      <span>设备正在接收信号。请按下配对手台的 PTT 键说话，音频将通过【{sdrConfig.output_device || "默认输出设备"}】播放。</span>
                       <Space wrap>
                         <Badge status={sdrStatus?.vad_active ? "processing" : "default"} />
                         <Text style={{ fontSize: 12 }}>{sdrStatus?.vad_active ? "正在接收信号..." : "等待信号"}</Text>
@@ -1661,13 +1606,13 @@ function Settings({ activeTab }: SettingsProps) {
                         <div>🔇 <b>CTCSS亚音:</b> {sdrStatus?.ctcss_tone && sdrStatus.ctcss_tone > 0 ? (
                           <>
                             {sdrStatus.ctcss_tone.toFixed(1)} Hz 
-                            <span style={{marginLeft: 8, color: sdrStatus.ctcss_detected ? 'green' : 'orange'}}>
-                              {sdrStatus.ctcss_detected ? `✅已检测 (强度${sdrStatus.ctcss_strength.toFixed(2)})` : '⏳检测中...'}
+                            <span style={{marginLeft: 8}}>
+                              {sdrStatus.ctcss_detected ? "🟢" : "🔴"}
                             </span>
                           </>
                         ) : "未启用"}</div>
                         <div>🔊 音频输出采样率: {sdrStatus?.debug_out_sample_rate?.toLocaleString() ?? "—"} Hz | 队列长度: {sdrStatus?.debug_audio_queue_len ?? "—"} 样本</div>
-                        <div>🔧 解调模式: {sdrStatus?.demod_mode?.toUpperCase() ?? "—"} | PPM: {sdrStatus?.ppm_correction ?? 0} | VAD阈值: {sdrConfig.vad_threshold.toFixed(3)}</div>
+                        <div>🔧 解调模式: {sdrStatus?.demod_mode?.toUpperCase() ?? "—"} | PPM: {sdrStatus?.ppm_correction ?? 0} | VAD阈值: {sdrConfig.vad_threshold.toFixed(3)} | 带宽: {sdrConfig.bandwidth.toLocaleString()} Hz</div>
                         <div>💻 增益: {sdrStatus?.gain_db ?? "—"} dB | 音频流: {sdrStatus?.streaming ? "运行中" : "已停止"}</div>
                         <div style={{borderTop: "1px solid #ddd", marginTop: 4, paddingTop: 4}}><b>🔬 DSP诊断</b></div>
                         <div>IQ幅度范围: <b>{sdrStatus?.diag_iq_range?.toFixed(4) ?? "—"}</b>
@@ -1694,7 +1639,7 @@ function Settings({ activeTab }: SettingsProps) {
                 <Button
                   danger
                   icon={<DisconnectOutlined />}
-                  onClick={handleCallTestStop}
+                  onClick={handleSdrStopStream}
                   block
                 >
                   结束运行
@@ -1889,6 +1834,26 @@ function Settings({ activeTab }: SettingsProps) {
                   <Text>{sdrConfig.vad_threshold.toFixed(3)}</Text>
                 </Space>
                 <Text type="secondary">VAD阈值越小越灵敏，若误触发可适当调大</Text>
+              </Space>
+            </Card>
+
+            {/* 带宽设置 */}
+            <Card size="small">
+              <Title level={5} style={{ marginTop: 0 }}>带宽设置</Title>
+              <Space direction="vertical" style={{ width: "100%" }}>
+                <Space align="center">
+                  <Text style={{ width: 100 }}>接收带宽:</Text>
+                  <InputNumber
+                    min={5000}
+                    max={250000}
+                    step={5000}
+                    value={sdrConfig.bandwidth}
+                    onChange={(val) => val !== null && handleSdrSetBandwidth(val)}
+                    addonAfter="Hz"
+                    style={{ width: 160 }}
+                  />
+                  <Text type="secondary">匹配SDR++设置（默认150000Hz）</Text>
+                </Space>
               </Space>
             </Card>
           </Space>

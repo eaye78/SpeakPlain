@@ -96,6 +96,7 @@ pub struct AppConfig {
     pub sdr_vad_threshold: f32,       // VAD阈值
     pub sdr_ctcss_tone: f32,          // CTCSS亚音频频率(Hz)，0表示禁用
     pub sdr_ctcss_threshold: f32,     // CTCSS检测门限
+    pub sdr_bandwidth: u32,            // SDR带宽(Hz)，默认150000匹配SDR++
 }
 
 impl Default for AppConfig {
@@ -142,16 +143,17 @@ impl Default for AppConfig {
             ],
             sdr_enabled: false,
             sdr_device_index: None,
-            sdr_frequency_mhz: 461.025,
-            sdr_gain_db: 30,
-            sdr_auto_gain: false,
+            sdr_frequency_mhz: 438.625,  // 匹配SDR++截图频率
+            sdr_gain_db: 6,              // 默认增益6dB（接近Fitipower FC0013的6.1dB）
+            sdr_auto_gain: true,         // 启用自动增益
             sdr_output_device: String::new(),
             sdr_input_source: InputSource::Microphone,
-            sdr_demod_mode: crate::sdr::DemodMode::Nbfm,
+            sdr_demod_mode: crate::sdr::DemodMode::Wbfm,  // 匹配SDR++截图WFM模式
             sdr_ppm_correction: 0,
             sdr_vad_threshold: 0.01,
-            sdr_ctcss_tone: 0.0,
-            sdr_ctcss_threshold: 0.15,
+            sdr_ctcss_tone: 85.4,       // 默认CTCSS频率
+            sdr_ctcss_threshold: 0.005,  // 降低门限到0.5%
+            sdr_bandwidth: 150_000,      // 匹配SDR++带宽150kHz
         }
     }
 }
@@ -340,6 +342,11 @@ impl AppConfig {
                 config.sdr_ctcss_threshold = th;
             }
         }
+        if let Ok(Some(value)) = storage.get_setting("sdr_bandwidth") {
+            if let Ok(bw) = value.parse::<u32>() {
+                config.sdr_bandwidth = bw;
+            }
+        }
 
         Ok(config)
     }
@@ -385,6 +392,7 @@ impl AppConfig {
         storage.set_setting("sdr_vad_threshold", &self.sdr_vad_threshold.to_string())?;
         storage.set_setting("sdr_ctcss_tone", &self.sdr_ctcss_tone.to_string())?;
         storage.set_setting("sdr_ctcss_threshold", &self.sdr_ctcss_threshold.to_string())?;
+        storage.set_setting("sdr_bandwidth", &self.sdr_bandwidth.to_string())?;
 
         Ok(())
     }
