@@ -1481,7 +1481,8 @@ impl SdrManager {
                 let ctcss_threshold = cfg_snap2.ctcss_threshold;
                 let is_call_test = call_test_mode_flag.load(Ordering::Relaxed);
                 
-                let (ctcss_detected, ctcss_strength) = if ctcss_tone > 0.0 && squelch_open {
+                // 始终初始化并运行CTCSS检测器（方便诊断），但只在Squelch开启时信任结果
+                let (ctcss_detected, ctcss_strength) = if ctcss_tone > 0.0 {
                     // 延迟初始化检测器（使用stage1_rate采样率）
                     if ctcss_detector.is_none() {
                         ctcss_detector = Some(CtcssDetector::new(ctcss_tone, pipeline.stage1_rate as f32, ctcss_threshold));
@@ -1491,16 +1492,16 @@ impl SdrManager {
                     if let Some(ref mut detector) = ctcss_detector {
                         // 处理频偏样本（Goertzel 直接检测目标频率）
                         detector.process(&dsp_output.freq_samples);
-                        (detector.detected, detector.strength)
+                        if squelch_open {
+                            // 有信号：使用检测器结果
+                            (detector.detected, detector.strength)
+                        } else {
+                            // 无信号：显示检测器结果但标记为未检测（避免false positive）
+                            (false, detector.strength)
+                        }
                     } else {
                         (false, 0.0)
                     }
-                } else if ctcss_tone > 0.0 && !squelch_open {
-                    // 无信号（Squelch 关闭）：重置 CTCSS 检测器，避免噪声导致 false positive
-                    if let Some(ref mut detector) = ctcss_detector {
-                        detector.reset();
-                    }
-                    (false, 0.0)
                 } else {
                     // 未设置CTCSS，始终返回检测通过
                     (true, 1.0)
@@ -1564,6 +1565,34 @@ impl SdrManager {
                         );
                     } else {
                         log::warn!("[首帧音频诊断] 音频样本为空，请检查FM解调是否正常");
+                    }
+                    
+                    // [首帧频偏诊断] - CTCSS检测的关键输入
+                    if !dsp_output.freq_samples.is_empty() {
+                        let freq_mean = dsp_output.freq_samples.iter().sum::<f32>() / dsp_output.freq_samples.len() as f32;
+                        let freq_max = dsp_output.freq_samples.iter().cloned().fold(f32::MIN, f32::max);
+                        let freq_min = dsp_output.freq_samples.iter().cloned().fold(f32::MAX, f32::min);
+                        let freq_rms = (dsp_output.freq_samples.iter().map(|&x| x * x).sum::<f32>() / dsp_output.freq_samples.len() as f32).sqrt();
+                        let freq_range = freq_max - freq_min;
+                        log::info!(
+                            "[首帧频偏诊断] 样本数={} 均值={:.6} 范围=[{:.6},{:.6}] RMS={:.6} 峰峰值={:.6} 状态={}",
+                            dsp_output.freq_samples.len(), freq_mean, freq_min, freq_max, freq_rms, freq_range,
+                            if freq_rms > 0.0001 { "正常" } else { "信号极弱-CTCSS可能检测不到" }
+                        );
+                        // 检查是否有85.4Hz附近的周期性成分（简单自相关）
+                        let sample_rate = pipeline.stage1_rate as f32;
+                        let period_samples = (sample_rate / 85.4).round() as usize;
+                        if dsp_output.freq_samples.len() > period_samples * 2 {
+                            let mut correlation = 0.0f32;
+                            let n = dsp_output.freq_samples.len() - period_samples;
+                            for i in 0..n {
+                                correlation += dsp_output.freq_samples[i] * dsp_output.freq_samples[i + period_samples];
+                            }
+                            correlation /= n as f32;
+                            log::info!("[首帧频偏诊断] 85.4Hz自相关={:.6e} (正值表示可能有周期性成分)", correlation);
+                        }
+                    } else {
+                        log::warn!("[首帧频偏诊断] 频偏样本为空，CTCSS检测器无输入！");
                     }
                 }
 
