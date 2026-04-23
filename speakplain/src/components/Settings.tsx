@@ -279,25 +279,23 @@ function Settings({ activeTab }: SettingsProps) {
   const [sdrStatus, setSdrStatus] = useState<SdrStatus | null>(null);
   const [sdrConfig, setSdrConfig] = useState<SdrConfig>({
     enabled: false,
-    frequency_mhz: 438.625,  // 匹配SDR++截图频率
-    gain_db: 6,              // 匹配SDR++截图增益（降低避免饱和）
-    auto_gain: true,          // 启用自动增益避免信号过强
+    frequency_mhz: 438.625,  // 常用对讲机频率
+    gain_db: 6,              // Fitipower FC0013推荐值
+    auto_gain: true,         // 启用自动增益避免信号过强
     output_device: "",
     input_source: "microphone",
-    demod_mode: "wbfm",      // 匹配SDR++截图WFM模式
+    demod_mode: "wbfm",      // 对齐 SDR++ 截图配置（WFM + 150kHz）
     ppm_correction: 0,
-    vad_threshold: 0.01,
-    ctcss_tone: 85.4,        // 匹配SDR++截图CTCSS
-    ctcss_threshold: 0.005,  // 降低门限到0.5%以检测WFM中的CTCSS
-    bandwidth: 150000,       // 匹配SDR++带宽150kHz
+    vad_threshold: 0.05,     // 适当提高，减少噪声误触发
+    ctcss_tone: 0.0,         // 默认禁用，用户按需开启
+    ctcss_threshold: 0.05,
+    bandwidth: 150000,        // 对齐 SDR++ 截图配置（150kHz WFM）
   });
   const [sdrLoading, setSdrLoading] = useState(false);
   const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<number | null>(null);
   const [sdrSignal, setSdrSignal] = useState(0);
   const [zadigLoading, setZadigLoading] = useState(false);
   const [showSdrAdvanced, setShowSdrAdvanced] = useState(false);
-  const [rtlsdrLog, setRtlsdrLog] = useState<string | null>(null);
-  const [rtlsdrLogPath, setRtlsdrLogPath] = useState<string>("");
   const sdrSignalTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -1146,22 +1144,18 @@ function Settings({ activeTab }: SettingsProps) {
     }
   };
 
-  const handleSdrSetPpm = async (ppm: number) => {
-    try {
-      await invoke("sdr_set_ppm", { ppm });
-      setSdrConfig(prev => ({ ...prev, ppm_correction: ppm }));
-    } catch (err: any) {
+  const handleSdrSetPpm = (ppm: number) => {
+    setSdrConfig(prev => ({ ...prev, ppm_correction: ppm }));
+    invoke("sdr_set_ppm", { ppm }).catch((err: any) => {
       message.error("设置PPM失败: " + err);
-    }
+    });
   };
 
-  const handleSdrSetVadThreshold = async (threshold: number) => {
-    try {
-      await invoke("sdr_set_vad_threshold", { threshold });
-      setSdrConfig(prev => ({ ...prev, vad_threshold: threshold }));
-    } catch (err: any) {
+  const handleSdrSetVadThreshold = (threshold: number) => {
+    setSdrConfig(prev => ({ ...prev, vad_threshold: threshold }));
+    invoke("sdr_set_vad_threshold", { threshold }).catch((err: any) => {
       message.error("设置VAD阈值失败: " + err);
-    }
+    });
   };
 
   const handleSdrSetCtcssTone = async (tone: number) => {
@@ -1173,13 +1167,11 @@ function Settings({ activeTab }: SettingsProps) {
     }
   };
 
-  const handleSdrSetCtcssThreshold = async (threshold: number) => {
-    try {
-      await invoke("sdr_set_ctcss_threshold", { threshold });
-      setSdrConfig(prev => ({ ...prev, ctcss_threshold: threshold }));
-    } catch (err: any) {
+  const handleSdrSetCtcssThreshold = (threshold: number) => {
+    setSdrConfig(prev => ({ ...prev, ctcss_threshold: threshold }));
+    invoke("sdr_set_ctcss_threshold", { threshold }).catch((err: any) => {
       message.error("设置CTCSS门限失败: " + err);
-    }
+    });
   };
 
   const handleSdrSetBandwidth = async (bandwidth: number) => {
@@ -1231,19 +1223,6 @@ function Settings({ activeTab }: SettingsProps) {
       await loadSdrData();
     } catch (err: any) {
       message.error("停止接收失败: " + err);
-    }
-  };
-
-  const handleViewRtlsdrLog = async () => {
-    try {
-      const [log, path] = await Promise.all([
-        invoke<string>("sdr_get_rtlsdr_log"),
-        invoke<string>("sdr_get_rtlsdr_log_path"),
-      ]);
-      setRtlsdrLog(log || "(日志为空)");
-      setRtlsdrLogPath(path);
-    } catch (err: any) {
-      setRtlsdrLog("读取失败: " + err);
     }
   };
 
@@ -1378,7 +1357,18 @@ function Settings({ activeTab }: SettingsProps) {
                   >
                     信号 {sdrStatus.connected ? `${Math.min(100, Math.round(sdrSignal * 100))}%` : "—"}
                   </Tag>
-                  {sdrConfig.ctcss_tone > 0 && (
+                  {sdrConfig.ctcss_tone > 0 && sdrStatus?.streaming && (
+                    sdrStatus.ctcss_detected ? (
+                      <Tag color="green" style={{ fontSize: 12 }}>
+                        🟢 {sdrConfig.ctcss_tone}Hz
+                      </Tag>
+                    ) : (
+                      <Tag color="red" style={{ fontSize: 12 }}>
+                        🔴 未检测到
+                      </Tag>
+                    )
+                  )}
+                  {sdrConfig.ctcss_tone > 0 && !sdrStatus?.streaming && (
                     <Tag color="cyan" style={{ fontSize: 12 }}>
                       🔇 {sdrConfig.ctcss_tone}Hz
                     </Tag>
@@ -1548,10 +1538,18 @@ function Settings({ activeTab }: SettingsProps) {
                   />
                   <Text>{sdrConfig.ctcss_threshold.toFixed(3)}</Text>
                 </Space>
-                {sdrStatus?.ctcss_detected !== undefined && (
-                  <div style={{ fontSize: 12, color: sdrStatus.ctcss_detected ? "green" : "#999" }}>
-                    CTCSS 检测状态: {sdrStatus.ctcss_detected ? "🟢 检测到亚音信号" : "🔴 未检测到亚音信号"}
-                    {sdrStatus.ctcss_strength > 0 && ` (强度: ${(sdrStatus.ctcss_strength * 100).toFixed(1)}%)`}
+                {sdrStatus?.ctcss_detected !== undefined && sdrStatus?.streaming && (
+                  <div style={{ fontSize: 12 }}>
+                    {sdrStatus.ctcss_detected ? (
+                      <span style={{ color: "green" }}>
+                        🟢 检测到亚音 {sdrConfig.ctcss_tone}Hz
+                        {sdrStatus.ctcss_strength > 0 && ` (强度: ${(sdrStatus.ctcss_strength * 100).toFixed(1)}%)`}
+                      </span>
+                    ) : (
+                      <span style={{ color: "red" }}>
+                        🔴 未检测到亚音信号
+                      </span>
+                    )}
                   </div>
                 )}
               </>
@@ -1646,19 +1644,6 @@ function Settings({ activeTab }: SettingsProps) {
                 </Button>
               </>
             )}
-
-            {/* rtl_sdr 日志 */}
-            <div>
-              <Button size="small" onClick={handleViewRtlsdrLog}>
-                查看 rtl_sdr 进程日志
-              </Button>
-              {rtlsdrLogPath && <Text type="secondary" style={{ fontSize: 10, marginLeft: 8 }}>{rtlsdrLogPath}</Text>}
-              {rtlsdrLog !== null && (
-                <div style={{ marginTop: 6, fontFamily: "monospace", fontSize: 10, background: "#1a1a1a", color: "#0f0", padding: "8px", borderRadius: 4, maxHeight: 200, overflowY: "auto", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
-                  {rtlsdrLog || "(日志为空，尚未连接设备)"}
-                </div>
-              )}
-            </div>
           </Space>
         </Card>
 

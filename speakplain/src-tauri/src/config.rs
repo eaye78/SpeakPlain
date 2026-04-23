@@ -87,7 +87,7 @@ pub struct AppConfig {
     pub sdr_enabled: bool,            // SDR功能开关
     pub sdr_device_index: Option<u32>, // SDR设备索引
     pub sdr_frequency_mhz: f64,       // SDR接收频率(MHz)
-    pub sdr_gain_db: i32,             // SDR增益(dB)
+    pub sdr_gain_db: f32,             // SDR增益(dB)
     pub sdr_auto_gain: bool,          // SDR自动增益
     pub sdr_output_device: String,    // SDR输出设备
     pub sdr_input_source: InputSource, // 输入源选择
@@ -144,7 +144,7 @@ impl Default for AppConfig {
             sdr_enabled: false,
             sdr_device_index: None,
             sdr_frequency_mhz: 438.625,  // 匹配SDR++截图频率
-            sdr_gain_db: 6,              // 默认增益6dB（接近Fitipower FC0013的6.1dB）
+            sdr_gain_db: 19.7,           // FC0013最大有效增益19.7dB
             sdr_auto_gain: true,         // 启用自动增益
             sdr_output_device: String::new(),
             sdr_input_source: InputSource::Microphone,
@@ -302,7 +302,7 @@ impl AppConfig {
             }
         }
         if let Ok(Some(value)) = storage.get_setting("sdr_gain_db") {
-            if let Ok(gain) = value.parse::<i32>() {
+            if let Ok(gain) = value.parse::<f32>() {
                 config.sdr_gain_db = gain;
             }
         }

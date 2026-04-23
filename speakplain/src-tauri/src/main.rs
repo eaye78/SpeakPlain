@@ -14,7 +14,6 @@ mod tray;
 mod llm;
 mod command;
 mod sdr;
-mod sdr_core;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1012,7 +1011,7 @@ async fn sdr_set_frequency(state: State<'_, AppState>, freq_mhz: f64) -> Result<
 
 /// 设置SDR增益
 #[tauri::command]
-async fn sdr_set_gain(state: State<'_, AppState>, gain_db: i32) -> Result<(), String> {
+async fn sdr_set_gain(state: State<'_, AppState>, gain_db: f32) -> Result<(), String> {
     state.sdr_manager.lock().set_gain(gain_db).map_err(|e| e.to_string())?;
     let mut cfg = state.config.lock();
     cfg.sdr_gain_db = gain_db;
@@ -1151,19 +1150,6 @@ async fn sdr_trigger_asr(state: State<'_, AppState>, app_handle: AppHandle) -> R
     info!("SDR ASR触发：音频样本数={}", audio_data.len());
     recognize_and_paste(app_handle, audio_data);
     Ok(())
-}
-
-/// 读取 rtl_sdr 进程日志（排查硬件问题用）
-#[tauri::command]
-async fn sdr_get_rtlsdr_log() -> Result<String, String> {
-    Ok(sdr::get_rtlsdr_log(60))
-}
-
-/// 获取 rtl_sdr 日志文件路径
-#[tauri::command]
-async fn sdr_get_rtlsdr_log_path() -> Result<String, String> {
-    let p = std::env::temp_dir().join("speakplain_rtlsdr.log");
-    Ok(p.to_string_lossy().to_string())
 }
 
 /// 实时信号强度查询（前端轮询使用）
@@ -1633,8 +1619,6 @@ fn main() {
             sdr_stop_stream,
             sdr_test_connection,
             sdr_trigger_asr,
-            sdr_get_rtlsdr_log,
-            sdr_get_rtlsdr_log_path,
             sdr_set_input_source,
             sdr_get_input_source,
             sdr_launch_zadig,
