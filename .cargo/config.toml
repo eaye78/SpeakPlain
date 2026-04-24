@@ -8,11 +8,10 @@ registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"
 git-fetch-with-cli = true
 
 [build]
-# 限制并行编译 job 数，避免多个 cargo 进程同时争抢 package cache 锁
+# 限制并行编译 job 数，避免多个 cargo 进程同时争抚 package cache 锁
 jobs = 4
 
-[profile.dev]
-# dev 模式下只优化依赖，加快增量编译
-opt-level = 0
-debug = true
-incremental = true
+# 禁用 MSVC 增量链接器，防止 LNK2019 错误
+# Tauri 2 + MSVC 增量链接器存在已知 bug，在热重载或多次重编后会产生符号找不到的问题
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/INCREMENTAL:NO"]

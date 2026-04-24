@@ -135,6 +135,25 @@ impl AppState {
 
 // ── 内部共用函数 ──
 
+/// SDR 音频降采样：48000Hz → 16000Hz（3:1 平均降采样）
+fn sdr_resample_to_16k(input: &[f32]) -> Vec<f32> {
+    const RATIO: usize = 3; // 48000 / 16000
+    let out_len = input.len() / RATIO;
+    let mut out = Vec::with_capacity(out_len);
+    for i in 0..out_len {
+        let sum = input[i * RATIO] + input[i * RATIO + 1] + input[i * RATIO + 2];
+        out.push(sum / RATIO as f32);
+    }
+    out
+}
+
+/// SDR 路径识别：先降采样到 16kHz 再送入 ASR
+fn recognize_and_paste_sdr(app_handle: AppHandle, audio_data: Vec<f32>) {
+    let resampled = sdr_resample_to_16k(&audio_data);
+    info!("SDR音频降采样: 48kHz → 16kHz, {}样本 → {}样本", audio_data.len(), resampled.len());
+    recognize_and_paste(app_handle, resampled);
+}
+
 /// 异步识别并粘贴文本
 fn recognize_and_paste(app_handle: AppHandle, audio_data: Vec<f32>) {
     tauri::async_runtime::spawn(async move {
@@ -1195,16 +1214,25 @@ async fn sdr_set_input_source(state: State<'_, AppState>, app_handle: AppHandle,
                 let vad_cb: Box<dyn Fn(bool) + Send + 'static> = Box::new(move |has_voice: bool| {
                     let s: State<AppState> = h.state();
                     if has_voice {
-                        // 手台PTT按下（检测到语音）→ 显示接收中状态（不启动计时线程，避免重发事件覆盖processing）
+                        // 检测到语音（含亚音验证）→ 显示悬浮框并启动计时器+声波
                         let indicator = s.indicator.lock();
                         indicator.show();
                         indicator.set_sdr_receiving();
                     } else {
-                        // 手台PTT松开（信号彻底消失）→ 切换到处理中状态
+                        // 语音消失 → 停止计时器，切换到处理中状态
                         s.indicator.lock().set_processing();
                     }
                 });
                 *state.sdr_manager.lock().on_vad_change.lock() = Some(vad_cb);
+
+                // 注册后立即检查当前 VAD 状态：若流已运行且 VAD 已活跃，
+                // 补发一次 has_voice=true，避免错过注册前的 false→true 跳变
+                let already_active = state.sdr_manager.lock().get_status().vad_active;
+                if already_active {
+                    let indicator = state.indicator.lock();
+                    indicator.show();
+                    indicator.set_sdr_receiving();
+                }
             }
 
             // 当切到 SDR 模式：注册语音段结束回调，自动启动流
@@ -1213,7 +1241,7 @@ async fn sdr_set_input_source(state: State<'_, AppState>, app_handle: AppHandle,
                 let handle = h.clone();
                 tauri::async_runtime::spawn(async move {
                     info!("SDR VAD触发语音段结束，送入ASR，样本数={}", audio_data.len());
-                    recognize_and_paste(handle, audio_data);
+                    recognize_and_paste_sdr(handle, audio_data);
                 });
             });
             *state.sdr_manager.lock().on_speech_end.lock() = Some(cb);
@@ -1487,6 +1515,52 @@ fn main() {
                     let s: State<AppState> = handle_ready.state();
                     s.indicator.lock().resend_status();
                 });
+            }
+
+            // 如果配置保存的是 SDR 模式，启动时补注册 VAD/信号回调（on_vad_change 在 sdr_set_input_source 里注册，
+            // 但 apply_saved_config 不调用该函数，导致回调缺失）
+            {
+                let state: State<AppState> = handle.state();
+                let is_sdr = state.sdr_manager.lock().get_input_source() == sdr::InputSource::Sdr;
+                if is_sdr {
+                    // signal 回调
+                    {
+                        let h = handle.clone();
+                        let signal_cb: Box<dyn Fn(f32) + Send + 'static> = Box::new(move |signal: f32| {
+                            let s: State<AppState> = h.state();
+                            s.indicator.lock().emit_volume(signal);
+                        });
+                        *state.sdr_manager.lock().on_signal.lock() = Some(signal_cb);
+                    }
+                    // VAD 变化回调
+                    {
+                        let h = handle.clone();
+                        let vad_cb: Box<dyn Fn(bool) + Send + 'static> = Box::new(move |has_voice: bool| {
+                            let s: State<AppState> = h.state();
+                            if has_voice {
+                                let indicator = s.indicator.lock();
+                                indicator.show();
+                                indicator.set_sdr_receiving();
+                            } else {
+                                s.indicator.lock().set_processing();
+                            }
+                        });
+                        *state.sdr_manager.lock().on_vad_change.lock() = Some(vad_cb);
+                    }
+                    // 语音段结束回调
+                    {
+                        let h = handle.clone();
+                        let cb: Box<dyn Fn(Vec<f32>) + Send + 'static> = Box::new(move |audio_data: Vec<f32>| {
+                            let handle = h.clone();
+                            tauri::async_runtime::spawn(async move {
+                                info!("SDR VAD触发语音段结束，送入ASR，样本数={}", audio_data.len());
+                                recognize_and_paste_sdr(handle, audio_data);
+                            });
+                        });
+                        *state.sdr_manager.lock().on_speech_end.lock() = Some(cb);
+                    }
+                    info!("应用启动：SDR模式已恢复，回调已注册");
+                }
             }
 
             // 注册音量回调 → 转发到 on_volume

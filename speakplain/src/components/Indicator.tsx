@@ -28,10 +28,14 @@ function Indicator() {
   // SDR 模式：由后端信号值直接驱动波形，无需 getUserMedia
   const sdrSignalRef = useRef<number>(0);   // 最新收到的信号强度
   const sdrModeRef = useRef<boolean>(false); // 是否处于 SDR 驱动模式
+  const currentlyRecordingRef = useRef<boolean>(false); // 当前是否录音中（跨回调共享）
+  // SDR 信号超时：记录最后一次收到有效信号的时间（用于PTT松开检测）
+  const lastSignalTimeRef = useRef<number>(0);
+  const sdrTimeoutRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 计时器
   const startTimer = () => {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
     setElapsed(0);
-    if (timerRef.current) clearInterval(timerRef.current);
     timerRef.current = setInterval(() => setElapsed(s => s + 1), 1000);
   };
   const stopTimer = () => {
@@ -178,48 +182,87 @@ function Indicator() {
       emit("indicator:request_skin").catch(() => {});
     }, 100);
 
+    // SDR 信号超时检测：如果连续 2s 没有有效信号（vol > 0），视为 PTT 松开，自动停止计时器
+    const startSdrTimeout = () => {
+      if (sdrTimeoutRef.current) return;
+      sdrTimeoutRef.current = setInterval(() => {
+        if (!currentlyRecordingRef.current || !sdrModeRef.current) return;
+        const now = Date.now();
+        // 2 秒内没有收到信号 → PTT 松开，停止计时和波形
+        if (lastSignalTimeRef.current > 0 && now - lastSignalTimeRef.current > 2000) {
+          currentlyRecordingRef.current = false;
+          sdrModeRef.current = false;
+          stopTimer();
+          stopWaveform();
+          setStatus("idle");
+          if (sdrTimeoutRef.current) { clearInterval(sdrTimeoutRef.current); sdrTimeoutRef.current = null; }
+        }
+      }, 200);
+    };
+    const stopSdrTimeout = () => {
+      if (sdrTimeoutRef.current) { clearInterval(sdrTimeoutRef.current); sdrTimeoutRef.current = null; }
+      lastSignalTimeRef.current = 0;
+    };
+
     // 监听 indicator:volume 事件——麦克风和 SDR 均通过此事件推送信号强度
     const unlistenVolume = listen<number>("indicator:volume", (event) => {
       const vol = event.payload;
       sdrSignalRef.current = vol;
-      // 如果正在录音且还未启动 SDR 波形，自动切换
-      if (currentlyRecording && !rafRef.current) {
-        stopWaveform();
+      // 有信号（vol > 0.02）时更新最后信号时间
+      if (vol > 0.02) {
+        lastSignalTimeRef.current = Date.now();
+      }
+      // 如果正在录音且还未启动 SDR 波形，自动切换到 SDR 模式
+      if (currentlyRecordingRef.current && !rafRef.current) {
         startSdrWaveform();
-      } else if (currentlyRecording && !sdrModeRef.current) {
-        // 当前在麦克风波形模式，切换到 SDR 模式
+      } else if (currentlyRecordingRef.current && !sdrModeRef.current) {
         stopWaveform();
         startSdrWaveform();
       }
     });
 
-    // 记录当前是否处于录音状态（用于处理重复事件）
-    let currentlyRecording = false;
-
     const unlistenStatus = listen<StatusMessage>("indicator:status", (event) => {
       const newStatus = event.payload.status;
+      const newMessage = event.payload.message;
       const nowRecording = newStatus === "recording" || newStatus === "freetalk";
+      // 判断是否是 SDR 模式：后端发出的 SDR 录音状态 message 为 "SDR"
+      const isSdrStatus = newStatus === "recording" && newMessage === "SDR";
 
       setStatus(newStatus);
 
-      if (nowRecording && !currentlyRecording) {
-        currentlyRecording = true;
+      if (nowRecording && !currentlyRecordingRef.current) {
+        // 全新开始录音
+        currentlyRecordingRef.current = true;
         startTimer();
-        // SDR 模式检测：如果已有信号回调在推送，用 SDR 波形；否则用麦克风
-        if (sdrSignalRef.current > 0 || sdrModeRef.current) {
+        if (isSdrStatus || sdrSignalRef.current > 0 || sdrModeRef.current) {
+          sdrModeRef.current = true;
+          stopWaveform();
           startSdrWaveform();
+          lastSignalTimeRef.current = Date.now();
+          stopSdrTimeout();
+          startSdrTimeout();
         } else {
           startWaveform();
         }
-      } else if (nowRecording && currentlyRecording) {
-        if (!timerRef.current) startTimer();
-        if (!rafRef.current) {
-          if (sdrModeRef.current) startSdrWaveform(); else startWaveform();
+      } else if (nowRecording && currentlyRecordingRef.current) {
+        // 已在录音中再次收到 recording（重复按 PTT）—— 重置计时器和波形
+        startTimer();
+        stopSdrTimeout();
+        stopWaveform();
+        if (isSdrStatus || sdrModeRef.current) {
+          sdrModeRef.current = true;
+          startSdrWaveform();
+          lastSignalTimeRef.current = Date.now();
+          startSdrTimeout();
+        } else {
+          startWaveform();
         }
-      } else if (!nowRecording && currentlyRecording) {
-        currentlyRecording = false;
+      } else if (!nowRecording && currentlyRecordingRef.current) {
+        currentlyRecordingRef.current = false;
+        sdrModeRef.current = false;
         stopTimer();
         stopWaveform();
+        stopSdrTimeout();
       }
 
       // processing 状态启动计时
@@ -234,6 +277,7 @@ function Indicator() {
       stopTimer();
       stopProcTimer();
       stopWaveform();
+      stopSdrTimeout();
       unlistenStatus.then((f) => f());
       unlistenVolume.then((f) => f());
       unlistenSkin.then((f) => f());

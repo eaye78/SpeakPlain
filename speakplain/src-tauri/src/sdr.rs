@@ -128,7 +128,7 @@ impl Default for SdrConfig {
             input_source: InputSource::Microphone,
             demod_mode: DemodMode::Wbfm,  // 对齐 SDR++ 截图配置（WFM + 150kHz）
             ppm_correction: 0,
-            vad_threshold: 0.05,  // 适当提高，减少噪声误触发
+            vad_threshold: 0.20,  // 高于典型噪底(0.13~0.15)，避免无信号时误触发VAD
             sample_rate: 2_400_000,
             ctcss_tone: 0.0,  // 默认禁用CTCSS，用户按需开启
             ctcss_threshold: 0.05,
@@ -1746,19 +1746,22 @@ impl SdrManager {
                     );
                 }
 
-                // 推送信号强度回调（不论是否有语音）
-                let signal_val = (rms * 6.0).powf(0.65).min(1.0);
+                // 推送信号强度回调：基于实际输出到扬声器的音频（audio_samples_filtered）
+                // 与扬声器声音保持一致：CTCSS静音时为0，有声音时随音量变化
+                let audio_out_rms = if audio_samples_filtered.is_empty() {
+                    0.0f32
+                } else {
+                    (audio_samples_filtered.iter().map(|&x| x * x).sum::<f32>() / audio_samples_filtered.len() as f32).sqrt()
+                };
+                let signal_val = (audio_out_rms * 6.0).powf(0.65).min(1.0);
                 if let Some(ref cb) = *on_signal_ref.lock() {
                     cb(signal_val);
                 }
 
-                // VAD 检测使用原始音频（不受 CTCSS 静音影响）
-                // 参考 SDR++：CTCSS 只控制静音开关，不影响主信号路径的 VAD
-                let has_voice = if audio_samples.is_empty() {
-                    false
-                } else {
-                    vad_detect(&audio_samples, vad_threshold)
-                };
+                // VAD 检测：直接使用 squelch 状态（基于 IQ 功率）
+                // IQ 功率无人发射时 ≈0.017，有人发射时 ≈1.4，区分度远优于音频 RMS
+                // squelch_open 阈值 0.15 已在上方基于实测噪底校准，无需用户调整
+                let has_voice = squelch_open;
                 
                 // 诊断：每帧打印VAD信息（前10帧 或 CTCSS检测到时打印详细诊断）
                 let should_log_vad = diag_frame_count < 10 || (ctcss_detected && diag_frame_count < 100);
@@ -1809,6 +1812,7 @@ impl SdrManager {
                 // 当前帧无语音：累加静音帧数，达到阈值才真正结束语音段
                 // 这样可以容忍字间短暂停顿，只有 PTT 松开（信号彻底消失）
                 // 连续 silence_timeout_frames 帧才触发 on_speech_end
+                let was_in_silence_window = prev_vad && silence_frames > 0;
                 let vad_active_now = if has_voice {
                     silence_frames = 0;
                     true
@@ -1823,9 +1827,16 @@ impl SdrManager {
                 vad_ref.store(vad_active_now, Ordering::Relaxed);
 
                 // VAD状态变化时推送回调
+                // 特殊情况：在静音延迟窗口内重新检测到语音（PTT松开后立即再按），
+                // vad_active_now 保持 true 不变，但需要通知前端重新开始计时
                 if vad_active_now != prev_vad {
                     if let Some(ref cb) = *on_vad_change_ref.lock() {
                         cb(vad_active_now);
+                    }
+                } else if vad_active_now && was_in_silence_window && has_voice {
+                    // 静音窗口内重新有信号：补发一次 true，让前端重置计时器
+                    if let Some(ref cb) = *on_vad_change_ref.lock() {
+                        cb(true);
                     }
                 }
 

@@ -7,3 +7,9 @@ resolver = "2"
 # dev 模式启用优化，解决 DSP（FIR滤波器）debug 模式下性能极差问题
 [profile.dev]
 opt-level = 2
+codegen-units = 1  # 禁用多CGU，防止 MSVC 增量链接 LNK2019 错误
+incremental = false  # 禁用增量编译，彻底避免 .rcgu.o 版本冲突
+
+[profile.dev.build-override]
+opt-level = 2
+
