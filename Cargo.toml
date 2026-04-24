@@ -3,3 +3,7 @@ members = [
     "speakplain/src-tauri",
 ]
 resolver = "2"
+
+# dev 模式启用优化，解决 DSP（FIR滤波器）debug 模式下性能极差问题
+[profile.dev]
+opt-level = 2

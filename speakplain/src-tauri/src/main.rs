@@ -14,6 +14,7 @@ mod tray;
 mod llm;
 mod command;
 mod sdr;
+mod sdr_broadcast_test;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1136,6 +1137,12 @@ async fn sdr_test_connection(state: State<'_, AppState>) -> Result<sdr::TestResu
     state.sdr_manager.lock().test_connection().map_err(|e| e.to_string())
 }
 
+/// 【临时测试】一键收听 FM 广播
+#[tauri::command]
+async fn sdr_test_broadcast(state: State<'_, AppState>, freq_mhz: f64) -> Result<(), String> {
+    sdr_broadcast_test::run_broadcast_test(&state.sdr_manager.lock(), freq_mhz).map_err(|e| e.to_string())
+}
+
 /// 获取SDR音频缓冲并送入ASR识别
 /// 只有在SDR模式下（InputSource::Sdr）且音频缓冲非空时才触发ASR
 #[tauri::command]
@@ -1300,6 +1307,59 @@ async fn sdr_launch_zadig(app_handle: AppHandle) -> Result<(), String> {
     } else {
         Err("用户取消了操作或 Zadig 启动失败".to_string())
     }
+}
+
+/// 获取频道预设列表
+#[tauri::command]
+async fn sdr_get_channels(state: State<'_, AppState>) -> Result<Vec<config::SdrChannel>, String> {
+    Ok(state.config.lock().sdr_channels.clone())
+}
+
+/// 新增或更新频道预设
+#[tauri::command]
+async fn sdr_save_channel(state: State<'_, AppState>, channel: config::SdrChannel) -> Result<(), String> {
+    let mut cfg = state.config.lock();
+    // 保留3位小数精度
+    let mut ch = channel;
+    ch.frequency_mhz = (ch.frequency_mhz * 1000.0).round() / 1000.0;
+    if let Some(existing) = cfg.sdr_channels.iter_mut().find(|c| c.id == ch.id) {
+        *existing = ch;
+    } else {
+        // 新增：自动生成 ID
+        if ch.id.is_empty() {
+            ch.id = format!("ch_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis());
+        }
+        cfg.sdr_channels.push(ch);
+    }
+    cfg.save(&*state.storage.lock()).map_err(|e| e.to_string())
+}
+
+/// 删除频道预设
+#[tauri::command]
+async fn sdr_delete_channel(state: State<'_, AppState>, channel_id: String) -> Result<(), String> {
+    let mut cfg = state.config.lock();
+    cfg.sdr_channels.retain(|c| c.id != channel_id);
+    cfg.save(&*state.storage.lock()).map_err(|e| e.to_string())
+}
+
+/// 应用频道预设（切换频率+CTCSS）
+#[tauri::command]
+async fn sdr_apply_channel(state: State<'_, AppState>, channel_id: String) -> Result<(), String> {
+    let channel = {
+        let cfg = state.config.lock();
+        cfg.sdr_channels.iter().find(|c| c.id == channel_id).cloned()
+    };
+    let ch = channel.ok_or_else(|| "未找到频道".to_string())?;
+    // 设置频率
+    state.sdr_manager.lock().set_frequency(ch.frequency_mhz).map_err(|e| e.to_string())?;
+    // 设置CTCSS
+    state.sdr_manager.lock().set_ctcss_tone(ch.ctcss_tone);
+    // 更新全局配置并保存
+    let mut cfg = state.config.lock();
+    cfg.sdr_frequency_mhz = ch.frequency_mhz;
+    cfg.sdr_ctcss_tone = ch.ctcss_tone;
+    cfg.save(&*state.storage.lock()).map_err(|e| e.to_string())
 }
 
 fn main() {
@@ -1618,10 +1678,15 @@ fn main() {
             sdr_start_stream,
             sdr_stop_stream,
             sdr_test_connection,
+            sdr_test_broadcast,
             sdr_trigger_asr,
             sdr_set_input_source,
             sdr_get_input_source,
             sdr_launch_zadig,
+            sdr_get_channels,
+            sdr_save_channel,
+            sdr_delete_channel,
+            sdr_apply_channel,
         ])
         .run(tauri::generate_context!())
         .expect("运行应用时出错");

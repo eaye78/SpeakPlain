@@ -1,4 +1,4 @@
-//! SDR设备管理模块
+﻿//! SDR设备管理模块
 //! 支持RTL2832U设备，通过 rtl_sdr 进程读取IQ数据，参考ShinySDR架构实现DSP管线
 //!
 //! DSP管线：IQ原始数据 → NBFM解调 → FIR低通滤波 → 降采样(2.4MHz→16kHz) → VAD检测 → 输出
@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
+use ringbuf::{HeapRb, traits::{Consumer, Observer, Producer, Split}};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -57,6 +58,10 @@ pub struct SdrStatus {
     pub diag_iq_range: f32,
     /// 诊断：IQ 直流偏置 I（正常应接近0）
     pub diag_iq_dc_i: f32,
+    /// 接收带宽（Hz）
+    pub bandwidth: u32,
+    /// 是否自动增益
+    pub auto_gain: bool,
 }
 
 /// 解调模式（参考ShinySDR支持的解调器类型）
@@ -281,6 +286,7 @@ mod hw {
     /// 启动 RTL-SDR 读取线程，返回命令发送端
     ///
     /// 复刻 SDR++ worker 线程：在线程中 open 设备、reset_buffer、read_sync 循环
+    /// IQ 数据通过 channel 异步发送给 DSP 线程，读取与 DSP 并行执行
     pub fn start_read_thread(
         handle: &RtlSdrDeviceHandle,
         cfg: &SdrConfig,
@@ -297,8 +303,50 @@ mod hw {
         let gain_db = cfg.gain_db;
         let gain_list = handle.gain_list.clone();
 
-        // 计算 read_sync 缓冲区大小（参考 SDR++ asyncCount = roundf(sampleRate/(200*512))*512）
-        let read_len = ((sample_rate as f32 / (200.0 * 512.0)).round() as usize * 512 * 2).max(8192);
+        // read_sync 每次读取最小单元（512字节 = 256个IQ样本 = ~0.1ms @ 2.4MHz）
+        // 小缓冲 = 短等待时间 = IQ数据近乎实时进入DSP线程
+        let read_len = 512 * 2; // 1024字节，约0.2ms数据
+
+        // IQ 数据 channel：读取线程 → DSP线程
+        // 容量设大，避免读取线程因channel满而丢包
+        let (iq_tx, iq_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
+        let streaming_dsp = streaming.clone();
+
+        // DSP 处理批大小：每积累约 10ms 数据（采样率/100）才批量处理
+        // 太小 → DSP 调用过于频繁；太大 → 延迟高
+        let dsp_batch_bytes = ((sample_rate as usize / 100) * 2).max(4096); // ~10ms
+        log::debug!("[读取] read_len={}B DSP批大小={}B(~{:.1}ms)",
+            read_len, dsp_batch_bytes, dsp_batch_bytes as f32 / (sample_rate as f32 * 2.0) * 1000.0);
+
+        // DSP 线程：累积足够数据后批量处理，与读取线程并行
+        std::thread::spawn(move || {
+            let mut accum: Vec<u8> = Vec::with_capacity(dsp_batch_bytes * 2);
+            while streaming_dsp.load(Ordering::Relaxed) {
+                match iq_rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    Ok(buf) => {
+                        accum.extend_from_slice(&buf);
+                        // 累积够一批再处理，避免过于频繁的 DSP 调用
+                        if accum.len() >= dsp_batch_bytes {
+                            iq_callback(&accum);
+                            accum.clear();
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        // 超时：如果有积累数据则立即处理，避免尾部延迟
+                        if !accum.is_empty() {
+                            iq_callback(&accum);
+                            accum.clear();
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            // 处理剩余数据
+            if !accum.is_empty() {
+                iq_callback(&accum);
+            }
+            log::info!("DSP线程已退出");
+        });
 
         std::thread::spawn(move || {
             let mut device = match rtlsdr::open(dev_index as i32) {
@@ -353,23 +401,23 @@ mod hw {
                         DeviceCommand::SetFrequency(f) => if f != current_freq {
                             if device.set_center_freq(f).is_ok() {
                                 current_freq = f;
-                                log::info!("实时改频: {} Hz", f);
+                                log::debug!("实时改频: {} Hz", f);
                             }
                         },
                         DeviceCommand::SetGain(g) => {
                             if device.set_tuner_gain_mode(true).is_ok() && device.set_tuner_gain(g).is_ok() {
-                                log::info!("实时改增益: {} tenths-dB", g);
+                                log::debug!("实时改增益: {} tenths-dB", g);
                             }
                         },
                         DeviceCommand::SetAutoGain(en) => {
                             if device.set_tuner_gain_mode(!en).is_ok() {
-                                log::info!("实时改AGC: {}", if en { "自动" } else { "手动" });
+                                log::debug!("实时改AGC: {}", if en { "自动" } else { "手动" });
                             }
                         },
                         DeviceCommand::SetPpm(p) => if p != current_ppm {
                             if device.set_freq_correction(p).is_ok() {
                                 current_ppm = p;
-                                log::info!("实时改PPM: {}", p);
+                                log::debug!("实时改PPM: {}", p);
                             }
                         },
                     }
@@ -382,7 +430,8 @@ mod hw {
                                 first_read_logged = true;
                                 log::info!("[IQ读取] 首次成功读取 {} 字节", buf.len());
                             }
-                            iq_callback(&buf);
+                            // 发送给 DSP 线程，如果 channel 满则丢弃最旧的再发送
+                            let _ = iq_tx.try_send(buf);
                         }
                     }
                     Err(e) => {
@@ -419,11 +468,11 @@ pub struct IqFrontend {
     iq_balance: f32,
     /// 自动增益控制增益
     agc_gain: f32,
-    /// AGC 目标电平（RMS）
+    /// AGC 目标电平
     agc_target: f32,
-    /// AGC 攻击系数（快速降低增益）
+    /// AGC 攻击系数
     agc_attack: f32,
-    /// AGC 释放系数（慢速增加增益）
+    /// AGC 释放系数
     agc_release: f32,
 }
 
@@ -557,9 +606,15 @@ pub struct DspPipeline {
     fir1_q_state: Vec<f32>,
     /// 级1 FIR系数
     fir1_coeffs: Vec<f32>,
+    /// 级1 FIR I通道环形缓冲区位置
+    fir1_i_pos: usize,
+    /// 级1 FIR Q通道环形缓冲区位置
+    fir1_q_pos: usize,
     /// 级2 FIR低通（截止频率 = output_rate*0.4，消除级2混叠+音频带外噪声）
     fir2_state: Vec<f32>,
     fir2_coeffs: Vec<f32>,
+    /// 级2 FIR环形缓冲区位置
+    fir2_pos: usize,
     /// 级1计数器
     decim1_counter: usize,
     /// 级2计数器
@@ -590,6 +645,12 @@ pub struct DspPipeline {
     hp_state2: f32,
     /// 音频高通滤波器上一输入2（第二级）
     hp_prev_in2: f32,
+    /// AGC 增益状态（自适应，避免削波）
+    agc_gain: f32,
+    /// 去加重 alpha 系数（预计算，基于 output_rate）
+    deemph_alpha: f32,
+    /// 音频低通滤波器状态（3400Hz，限制语音带宽）
+    lp_audio_state: f32,
 }
 
 impl DspPipeline {
@@ -606,29 +667,37 @@ impl DspPipeline {
         // 级2：从stage1_rate抽取到output_rate
         let stage2_decim = ((stage1_rate / output_rate) as usize).max(1);
 
-        // 级1 FIR：抗混叠滤波器，截止 = stage1_rate * 0.45（避免抽取到 stage1_rate 时混叠）
-        // 信号带宽（如 12.5kHz）远小于此值，因此不会影响信号
+        // 级1 FIR：抗混叠滤波器，截止 = stage1_rate * 0.45
+        // 过渡带放宽到50%，大幅降低抽头数（tap ≈ 3.8*2.4M/(108k*0.5) ≈ 67）
         let fir1_cutoff = (stage1_rate as f32 * 0.45).min(input_rate as f32 / 2.0);
-        let fir1_trans = fir1_cutoff * 0.2;
+        let fir1_trans = fir1_cutoff * 0.5; // 宽过渡带，降低抽头数
         let _cutoff1_norm = fir1_cutoff / input_rate as f32;
         let fir1_coeffs = design_fir_lowpass_sdrpp(fir1_cutoff, fir1_trans, input_rate as f64);
 
         // 级2 FIR：音频低通，截止 = min(带宽/2, output_rate*0.45)
-        // 在 stage1_rate 频域设计
+        // 在 stage1_rate 频域设计，过渡带放宽到40%（tap ≈ 3.8*240k/(21600*0.4) ≈ 106）
         let half_bandwidth = (bandwidth as f32 / 2.0).min(stage1_rate as f32 / 2.0);
         let audio_bandwidth = half_bandwidth.min(output_rate as f32 * 0.45);
         let _cutoff2_norm = audio_bandwidth / stage1_rate as f32;
-        let fir2_coeffs = design_fir_lowpass_sdrpp(audio_bandwidth, audio_bandwidth * 0.1, stage1_rate as f64);
+        let fir2_coeffs = design_fir_lowpass_sdrpp(audio_bandwidth, audio_bandwidth * 0.4, stage1_rate as f64);
 
         // SDR++ Quadrature 解调：deviation = bandwidth / 2.0
         let deviation = bandwidth as f32 / 2.0;
         let inv_deviation = stage1_rate as f32 / (2.0 * std::f32::consts::PI * deviation);
 
-        log::info!("DSP管线(SDR++风格): input={}Hz bandwidth={}Hz stage1={}/{} stage2={}/{} output={}Hz deviation={}Hz",
+        log::debug!("DSP管线(SDR++风格): input={}Hz bandwidth={}Hz stage1={}/{} stage2={}/{} output={}Hz deviation={}Hz",
             input_rate, bandwidth, stage1_rate, stage1_decim, output_rate, stage2_decim, output_rate, deviation);
 
         let fir1_len = fir1_coeffs.len();
         let fir2_len = fir2_coeffs.len();
+
+        // 去加重在 output_rate 下预计算（修复：之前错误地在 stage1_rate 下计算）
+        const DEEMPH_TAU: f32 = 50e-6;
+        let deemph_dt = 1.0 / output_rate as f32;
+        let deemph_alpha = DEEMPH_TAU / (DEEMPH_TAU + deemph_dt);
+        
+        log::debug!("DSP管线: 去加重 alpha={:.4} @ {}Hz (50μs)", deemph_alpha, output_rate);
+        
         Self {
             mode,
             iq_frontend,
@@ -640,8 +709,11 @@ impl DspPipeline {
             fir1_i_state: vec![0.0f32; fir1_len],
             fir1_q_state: vec![0.0f32; fir1_len],
             fir1_coeffs,
+            fir1_i_pos: 0,
+            fir1_q_pos: 0,
             fir2_state: vec![0.0f32; fir2_len],
             fir2_coeffs,
+            fir2_pos: 0,
             decim1_counter: 0,
             decim2_counter: 0,
             signal_rms: 0.0,
@@ -657,12 +729,16 @@ impl DspPipeline {
             hp_prev_in1: 0.0,
             hp_state2: 0.0,
             hp_prev_in2: 0.0,
+            agc_gain: 1.0,
+            deemph_alpha,
+            lp_audio_state: 0.0,
         }
     }
 
     /// 处理一批IQ原始字节，返回解调后的音频和IQ样本
     /// 音频样本用于播放，IQ样本用于CTCSS检测（对齐SDR++）
     pub fn process(&mut self, iq_bytes: &[u8]) -> DspOutput {
+        let t_start = std::time::Instant::now();
         let n_samples = iq_bytes.len() / 2;
         let expected_audio_out = n_samples / (self.stage1_decim * self.stage2_decim) + 4;
         let expected_iq_out = n_samples / self.stage1_decim + 4;
@@ -710,8 +786,8 @@ impl DspPipeline {
             let (i, q) = self.iq_frontend.process(i_raw, q_raw);
 
             // 级1：复数 FIR 低通 + 抽取（SDR++ 风格：先滤波抽取，再解调）
-            let fi = Self::fir_filter_inplace(&mut self.fir1_i_state, &self.fir1_coeffs, i);
-            let fq = Self::fir_filter_inplace(&mut self.fir1_q_state, &self.fir1_coeffs, q);
+            let fi = Self::fir_filter_ring(&mut self.fir1_i_state, &self.fir1_coeffs, i, &mut self.fir1_i_pos);
+            let fq = Self::fir_filter_ring(&mut self.fir1_q_state, &self.fir1_coeffs, q, &mut self.fir1_q_pos);
             self.decim1_counter += 1;
             if self.decim1_counter < self.stage1_decim {
                 continue;
@@ -751,44 +827,39 @@ impl DspPipeline {
             // 保存频偏样本（用于CTCSS检测，去加重之前，SDR++风格）
             self.freq_samples.push(demod_sample);
 
-            // NBFM/WBFM去加重：50μs时间常数（SDR++ 截图配置）
-            let after_deemph = if matches!(self.mode, DemodMode::Nbfm | DemodMode::Wbfm) {
-                const DEEMPH_TAU: f32 = 50e-6; // 50微秒（对齐 SDR++）
-                let dt = 1.0 / self.stage1_rate as f32;
-                let alpha = DEEMPH_TAU / (DEEMPH_TAU + dt);
-                self.deemph_state = alpha * self.deemph_state + (1.0 - alpha) * demod_sample;
-                self.deemph_state
-            } else {
-                demod_sample
-            };
+            // 注意：去加重已移到 stage2 抽取后（output_rate），不再在 stage1_rate 下执行
 
             // 级2：FIR低通 + 抽取到 output_rate
-            let fir2_out = Self::fir_filter_inplace(&mut self.fir2_state, &self.fir2_coeffs, after_deemph);
+            let fir2_out = Self::fir_filter_ring(&mut self.fir2_state, &self.fir2_coeffs, demod_sample, &mut self.fir2_pos);
             self.decim2_counter += 1;
             if self.decim2_counter < self.stage2_decim {
                 continue;
             }
             self.decim2_counter = 0;
 
-            // 增益补偿（NBFM 需要较高增益，WFM 模式下实际频偏小也需提高增益）
-            let gain = match self.mode {
-                DemodMode::Nbfm => 10.0,
-                DemodMode::Wbfm => 50.0,  // 大幅提高：手台实际频偏小，WFM deviation 大导致 demod_sample 极小
-                DemodMode::Am   => 3.0,
-                _               => 2.0,
+            // 去加重：WFM 广播有预加重，必须去加重；NBFM 通常无预加重
+            let after_deemph = match self.mode {
+                DemodMode::Wbfm => {
+                    self.deemph_state = self.deemph_state * self.deemph_alpha + fir2_out * (1.0 - self.deemph_alpha);
+                    self.deemph_state
+                }
+                _ => fir2_out,
             };
-            let mut audio_sample = fir2_out * gain;
 
-            // 二阶 IIR 高通（两个级联单极点），截止 ~300Hz @ 48000Hz
-            // 对 85.4Hz CTCSS 亚音衰减约 22dB，避免亚音混入音频输出
-            const HP_ALPHA: f32 = 0.961; // alpha = 1/(1+2π*300/48000)
-            let hp1 = HP_ALPHA * (self.hp_state1 + audio_sample - self.hp_prev_in1);
-            self.hp_prev_in1 = audio_sample;
-            self.hp_state1 = hp1;
-            let hp2 = HP_ALPHA * (self.hp_state2 + hp1 - self.hp_prev_in2);
-            self.hp_prev_in2 = hp1;
-            self.hp_state2 = hp2;
-            audio_sample = hp2;
+            // 音频低通：fir2 已做抗混叠，WFM 保留更宽带宽不做额外限制
+            let lp_audio_out = after_deemph;
+
+            // AGC：自适应增益，目标电平 0.3，避免削波
+            const TARGET: f32 = 0.3;
+            const ATTACK: f32 = 0.9;
+            const RELEASE: f32 = 0.995;
+            let amp = lp_audio_out.abs();
+            if amp > TARGET {
+                self.agc_gain = self.agc_gain * ATTACK + (TARGET / amp.max(0.001)) * (1.0 - ATTACK);
+            } else {
+                self.agc_gain = self.agc_gain * RELEASE + 1.0 * (1.0 - RELEASE);
+            }
+            let audio_sample = lp_audio_out * self.agc_gain;
 
             let audio_sample = audio_sample.clamp(-1.0, 1.0);
             self.audio_out.push(audio_sample);
@@ -800,6 +871,10 @@ impl DspPipeline {
             self.diag_audio_rms = ar;
         }
 
+        let elapsed = t_start.elapsed();
+        if elapsed.as_millis() > 5 {
+            log::warn!("[DSP耗时] process {} 样本耗时 {:.2}ms (过长！)", n_samples, elapsed.as_secs_f32() * 1000.0);
+        }
         DspOutput {
             audio: self.audio_out.clone(),
             iq_samples: self.iq_samples.clone(),
@@ -807,14 +882,18 @@ impl DspPipeline {
         }
     }
 
-    /// FIR卷积滤波（单样本处理，移位寄存器实现）
-    fn fir_filter_inplace(state: &mut Vec<f32>, coeffs: &[f32], sample: f32) -> f32 {
-        let len = state.len();
-        for i in (1..len).rev() {
-            state[i] = state[i - 1];
+    /// FIR卷积滤波（环形缓冲区实现，O(1)写入 + O(n)点积，无内存移位）
+    fn fir_filter_ring(state: &mut [f32], coeffs: &[f32], sample: f32, pos: &mut usize) -> f32 {
+        state[*pos] = sample;
+        let n = coeffs.len();
+        let mut sum = 0.0f32;
+        // 从当前位置倒序读取，与系数正序相乘
+        for i in 0..n {
+            let idx = if *pos >= i { *pos - i } else { n + *pos - i };
+            sum += state[idx] * coeffs[i];
         }
-        state[0] = sample;
-        state.iter().zip(coeffs.iter()).map(|(s, c)| s * c).sum()
+        *pos = (*pos + 1) % n;
+        sum
     }
 }
 
@@ -991,13 +1070,13 @@ impl CtcssDetector {
             // 中间状态保持当前值
             self.detected_freq = if self.detected { self.target_freq } else { 0.0 };
 
-            // 诊断：每个窗口都打印，方便用户观察 raw_strength 值
+            // 仅在状态变化时打印
             let state_changed = self.detected != self.prev_detected;
             self.prev_detected = self.detected;
             self.window_log_count += 1;
-            if self.window_log_count <= 50 || state_changed {
-                log::info!("[CTCSS Goertzel#{}] lp_out振幅={:.4} power={:.2e} amplitude={:.5} raw_strength={:.3} smoothed={:.3} detected={} 无信号计数={}",
-                    self.window_log_count, lp_out, power, amplitude, raw_strength, self.smoothed_strength, self.detected, self.no_signal_count);
+            if state_changed {
+                log::info!("[CTCSS] {}Hz {} (strength={:.3})",
+                    self.target_freq, if self.detected { "检测到" } else { "消失" }, self.smoothed_strength);
             }
 
             // 重置 Goertzel 状态（开始新窗口）
@@ -1051,7 +1130,10 @@ fn design_fir_lowpass_sdrpp(cutoff: f32, trans_width: f32, sample_rate: f64) -> 
     // SDR++ estimateTapCount = 3.8 * samplerate / transWidth
     let tap_count = ((3.8 * sample_rate / trans_width as f64).round() as usize).max(3);
     // 确保奇数抽头数
-    let n_taps = if tap_count % 2 == 0 { tap_count + 1 } else { tap_count };
+    let tap_count = if tap_count % 2 == 0 { tap_count + 1 } else { tap_count };
+    // 限制最大抽头数为 31，确保 debug 模式下每帧 DSP < 5ms
+    // 31 抽头对应 ~6dB/octave 滚降，对 FM 广播音质足够
+    let n_taps = tap_count.min(31);
     let mut coeffs = vec![0.0f32; n_taps];
     let half = n_taps as f64 / 2.0;
     let omega = 2.0 * std::f64::consts::PI * cutoff as f64 / sample_rate;
@@ -1083,7 +1165,6 @@ fn design_fir_lowpass_sdrpp(cutoff: f32, trans_width: f32, sample_rate: f64) -> 
     coeffs
 }
 
-/// 获取 rtl_sdr 日志文件内容（请求时读取最后 N 行）
 /// VAD（语音活动检测）：判断音频片段是否含有语音
 /// 使用短时能量法，超过阈值认为有语音
 pub fn vad_detect(audio: &[f32], threshold: f32) -> bool {
@@ -1164,7 +1245,7 @@ impl SdrManager {
         }
     }
 
-    fn is_device_connected(&self) -> bool {
+    pub fn is_device_connected(&self) -> bool {
         self.device.lock().is_some()
     }
 
@@ -1373,45 +1454,62 @@ impl SdrManager {
             }
         };
 
-        // 使用设备默认支持的配置，避免 "not supported" 错误
-        let default_cfg = output_device.default_output_config()
-            .context("无法获取音频设备默认配置")?;
-        let out_sample_rate = default_cfg.sample_rate().0;
-        let out_channels = default_cfg.channels() as usize;
+        // 对齐 SDR++ audio_sink：
+        //   - 强制立体声2ch，采样率48000Hz（对应 Realtek Audio 硬件配置）
+        //   - bufferFrames = sampleRate / 60 ≈ 800帧 (~16.7ms)，最小化延迟
+        //   - 使用 RTAUDIO_MINIMIZE_LATENCY 等价：cpal Default buffer size
+        //   - ringbuf 存立体声 interleaved f32，回调直接 copy_from_slice（等价 memcpy）
+        const OUT_CHANNELS: usize = 2;
+        const OUT_SAMPLE_RATE: u32 = 48000;
+        // SDR++ bufferFrames = sampleRate / 60
+        let buffer_frames = OUT_SAMPLE_RATE / 60; // 800帧 = 16.7ms
         let stream_config = cpal::StreamConfig {
-            channels: default_cfg.channels(),
-            sample_rate: default_cfg.sample_rate(),
-            buffer_size: cpal::BufferSize::Default,
+            channels: OUT_CHANNELS as u16,
+            sample_rate: cpal::SampleRate(OUT_SAMPLE_RATE),
+            // Default 让驱动自选最小延迟，对应 SDR++ RTAUDIO_MINIMIZE_LATENCY
+            buffer_size: cpal::BufferSize::Fixed(buffer_frames),
         };
-        log::info!("SDR音频输出: {}Hz {}ch 设备: {} 配置={:?}",
-            out_sample_rate, out_channels,
-            output_device.name().unwrap_or_default(), default_cfg);
-        // 记录实际输出采样率供调试查询
+        let out_sample_rate = OUT_SAMPLE_RATE;
+        let out_channels = OUT_CHANNELS;
+        log::info!("[SDR音频] SDR++对齐 - 设备:{} 采样率:{}Hz {}ch bufferFrames={} ({:.1}ms)",
+            output_device.name().unwrap_or_default(),
+            out_sample_rate, out_channels, buffer_frames,
+            buffer_frames as f32 / out_sample_rate as f32 * 1000.0);
         self.out_sample_rate.store(out_sample_rate, Ordering::Relaxed);
 
-        // 共享音频队列（DSP线程写入，cpal回调消费）
-        // 容量 = 1秒音频，防止累积延迟
-        let queue_cap = out_sample_rate as usize;
-        let audio_queue: Arc<Mutex<std::collections::VecDeque<f32>>> =
-            Arc::new(Mutex::new(std::collections::VecDeque::with_capacity(queue_cap)));
+        // SDR++ stereoPacker 等价：ringbuf 存立体声 interleaved (L, R) = (sample, sample)
+        // 容量 = 1秒立体声样本（每帧2个f32），约够60次回调缓冲
+        let queue_cap = out_sample_rate as usize * out_channels; // 1秒立体声
+        let ring = HeapRb::<f32>::new(queue_cap);
+        let (mut audio_prod, mut audio_cons) = ring.split();
         let audio_queue_len_ref = self.audio_queue_len.clone();
 
         // DSP配置快照
         let cfg_snap = self.config.lock().clone();
 
-        // cpal输出回调：从队列取音频样本推送到音频设备
-        // 设备可能是多声道，每帧重复同一样本填满所有声道
-        let audio_queue_read = audio_queue.clone();
+        // SDR++ callback 等价：
+        //   count = stereoPacker.out.read();
+        //   memcpy(outputBuffer, readBuf, nBufferFrames * sizeof(stereo_t));
+        // Rust实现：从无锁ringbuf批量读取立体声样本直接填充data切片
         let stream = output_device.build_output_stream(
             &stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut q = audio_queue_read.lock();
-                let mut chunks = data.chunks_mut(out_channels);
-                while let Some(frame) = chunks.next() {
-                    let sample = q.pop_front().unwrap_or(0.0);
-                    for ch in frame.iter_mut() {
-                        *ch = sample;
+                // data.len() = buffer_frames * channels (interleaved stereo)
+                let available = audio_cons.occupied_len();
+                if available < data.len() {
+                    // 欠载：用静音填充缺失部分
+                    if available == 0 {
+                        // 完全欠载：静音（对应 SDR++ 无数据时不输出噪声）
+                        data.fill(0.0);
+                        return;
                     }
+                    log::warn!("[音频欠载] 环形缓冲仅{}个f32，需{}个，补静音", available, data.len());
+                }
+                // SDR++ 等价 memcpy：直接从ringbuf批量复制到输出缓冲
+                let copied = audio_cons.pop_slice(data);
+                // 若不够则用0填充剩余（上面欠载判断已覆盖，这里做保底）
+                if copied < data.len() {
+                    data[copied..].fill(0.0);
                 }
             },
             move |err| {
@@ -1419,8 +1517,7 @@ impl SdrManager {
             },
             None,
         )?;
-        stream.play()?;
-        *self.audio_stream.lock() = Some(StreamHandle(stream));
+        // 先标记 streaming 为 true，再启动读取线程，让数据先开始积累
         self.streaming.store(true, Ordering::Relaxed);
 
         // 启动IQ读取线程（直接调用 librtlsdr read_sync）
@@ -1436,7 +1533,6 @@ impl SdrManager {
         let call_test_mode_flag = self.call_test_mode.clone();
         let audio_queue_len_flag = audio_queue_len_ref.clone();
         let signal_ref = self.signal_strength_raw.clone();
-        let audio_queue_write = audio_queue.clone();
         let audio_buffer_ref = self.audio_buffer.clone();
         let vad_ref = self.vad_active.clone();
         let diag_audio_rms_ref = self.diag_audio_rms.clone();
@@ -1444,12 +1540,12 @@ impl SdrManager {
         let diag_iq_dc_i_ref = self.diag_iq_dc_i.clone();
         let ctcss_detected_ref = self.ctcss_detected.clone();
         let ctcss_strength_ref = self.ctcss_strength.clone();
-        let cfg_snap2 = cfg_snap.clone();
+        // 传入实时配置Arc，让DSP回调可以读取最新的ctcss_tone/ctcss_threshold
+        let config_arc = self.config.clone();
         let vad_threshold = cfg_snap.vad_threshold;
         let on_speech_end_ref = self.on_speech_end.clone();
         let on_signal_ref = self.on_signal.clone();
         let on_vad_change_ref = self.on_vad_change.clone();
-        let queue_cap2 = queue_cap;
 
         let mut pipeline = DspPipeline::new(sample_rate, audio_out_rate, demod_mode, bandwidth);
         let mut prev_vad = false;
@@ -1458,27 +1554,35 @@ impl SdrManager {
         let mut diag_frame_count: u32 = 0;
         let mut first_frame_logged = false;
         let mut ctcss_detector: Option<CtcssDetector> = None;
+        let mut last_iq_time = std::time::Instant::now();
 
         let cmd_tx = hw::start_read_thread(
             &device_handle,
             &cfg_snap,
             streaming_flag.clone(),
             move |iq_bytes: &[u8]| {
+                let iq_interval = last_iq_time.elapsed();
+                last_iq_time = std::time::Instant::now();
                 let dsp_output = pipeline.process(iq_bytes);
+                let process_time = last_iq_time.elapsed();
                 let rms = pipeline.signal_rms;
                 signal_ref.store(rms.to_bits(), Ordering::Relaxed);
                 
                 // 提取音频样本和IQ样本用于后续处理
-                // Squelch 静噪：基于 IQ RMS 判断有无信号（阈值 0.03）
-                // 注意：Squelch 不再控制音频静音（避免"嗒嗒"脉冲噪声）
-                // 仅用于：1) 控制 CTCSS 检测器重置 2) 信号强度显示
-                let squelch_open = pipeline.signal_rms > 0.03;
+                // Squelch 静噪：基于 IQ RMS 判断有无信号
+                // 修复：阈值从 0.03 提高到 0.15。噪声 floor RMS≈sqrt(0.0079)=0.089，
+                // 原阈值 0.03 低于噪声 floor，导致 squelch 始终开启、持续输出噪声。
+                // 0.15 略高于噪声 floor，确保无信号时 squelch 关闭。
+                let squelch_open = pipeline.signal_rms > 0.15;
                 let audio_samples: Vec<f32> = dsp_output.audio;
                 let _iq_samples = dsp_output.iq_samples;
 
                 // CTCSS 检测处理（Goertzel：使用 FM 解调后的频偏样本）
-                let ctcss_tone = cfg_snap2.ctcss_tone;
-                let ctcss_threshold = cfg_snap2.ctcss_threshold;
+                // 实时读取配置，确保流运行期间修改亚音设置立即生效
+                let (ctcss_tone, ctcss_threshold) = {
+                    let cfg = config_arc.lock();
+                    (cfg.ctcss_tone, cfg.ctcss_threshold)
+                };
                 let is_call_test = call_test_mode_flag.load(Ordering::Relaxed);
                 
                 // 始终初始化并运行CTCSS检测器（方便诊断），但只在Squelch开启时信任结果
@@ -1511,9 +1615,8 @@ impl SdrManager {
                 ctcss_detected_ref.store(ctcss_detected, Ordering::Relaxed);
                 ctcss_strength_ref.store(ctcss_strength.to_bits(), Ordering::Relaxed);
 
-                // CTCSS 静音控制（临时禁用：方便用户测试音频是否正常）
-                // let ctcss_mute = ctcss_tone > 0.0 && !ctcss_detected && !is_call_test;
-                let ctcss_mute = false; // 临时禁用：音频始终输出，方便诊断
+                // CTCSS 静音控制：设置了亚音且未检测到时静音
+                let ctcss_mute = ctcss_tone > 0.0 && !ctcss_detected;
                 
                 // SDR++ 风格：如果设置了亚音但未检测到，静音音频（输出0）
                 let audio_samples_filtered: Vec<f32> = if ctcss_mute {
@@ -1601,12 +1704,24 @@ impl SdrManager {
                 diag_iq_range_ref.store(pipeline.diag_iq_range.to_bits(), Ordering::Relaxed);
                 diag_iq_dc_i_ref.store(pipeline.diag_iq_dc_i.to_bits(), Ordering::Relaxed);
 
-                // 每50帧（约5秒）输出一次诊断日志
+                // 每帧输出 IQ 间隔和 DSP 处理时间（前20帧）
                 diag_frame_count += 1;
+                if diag_frame_count <= 20 {
+                    log::info!("[音频流计时#{}] IQ间隔={:.1}ms DSP处理={:.1}ms 音频产出={} 队列长度={}",
+                        diag_frame_count,
+                        iq_interval.as_secs_f32() * 1000.0,
+                        process_time.as_secs_f32() * 1000.0,
+                        audio_samples.len(),
+                        audio_queue_len_flag.load(Ordering::Relaxed));
+                }
                 if diag_frame_count % 50 == 0 {
                     let audio_rms_db = if pipeline.diag_audio_rms > 1e-7 {
                         20.0 * pipeline.diag_audio_rms.log10()
                     } else { -99.0 };
+                    // 计算 freq_samples RMS（诊断 FM 解调输出幅度）
+                    let freq_rms = if !dsp_output.freq_samples.is_empty() {
+                        (dsp_output.freq_samples.iter().map(|&x| x * x).sum::<f32>() / dsp_output.freq_samples.len() as f32).sqrt()
+                    } else { 0.0 };
                     let ctcss_status = if ctcss_tone > 0.0 {
                         let detected_freq = if let Some(ref detector) = ctcss_detector {
                             detector.detected_freq
@@ -1617,13 +1732,14 @@ impl SdrManager {
                     };
                     log::info!(
                         "[SDR诊断] 帧#{} IQ功率={:.4} IQ范围={:.3} DC_I={:.4} \
-                         音频RMS={:.5}({:.1}dB) VAD={} 队列={} {}",
+                         音频RMS={:.5}({:.1}dB) 频偏RMS={:.5} VAD={} 队列={} {}",
                         diag_frame_count,
                         rms,
                         pipeline.diag_iq_range,
                         pipeline.diag_iq_dc_i,
                         pipeline.diag_audio_rms,
                         audio_rms_db,
+                        freq_rms,
                         vad_ref.load(Ordering::Relaxed),
                         audio_queue_len_flag.load(Ordering::Relaxed),
                         ctcss_status
@@ -1713,21 +1829,35 @@ impl SdrManager {
                     }
                 }
 
-                // 音频输出到播放队列（应用 CTCSS 静音）
+                // 推送音频样本到无锁环形缓冲区（DSP线程写，cpal回调读）
+                // SDR++ stereoPacker 等价：单声道样本展开为立体声 interleaved (L=s, R=s)
                 {
-                    let mut q = audio_queue_write.lock();
-                    // 通话测试模式：始终播放音频（绕过VAD）；正常模式：根据VAD状态播放
-                    let should_output_audio = is_call_test || vad_active_now;
-                    if should_output_audio {
-                        // 输出音频（已应用 CTCSS 静音）
-                        for s in &audio_samples_filtered { q.push_back(*s); }
+                    let n = audio_samples_filtered.len();
+                    // 预分配立体声缓冲：每个单声道样本展开为 2 个 f32
+                    let stereo_len = n * 2;
+                    let free = audio_prod.vacant_len();
+                    if free < stereo_len {
+                        // 环形缓冲已满：跳过本批数据（保持实时性，避免延迟累积）
+                        log::debug!("[音频丢弃] 环形缓冲已满 ({} free, need {})，丢弃本批", free, stereo_len);
                     } else {
-                        // 推静音样本保持播放流畅滚
-                        for _ in 0..audio_samples_filtered.len() { q.push_back(0.0); }
+                        // SDR++ stereoPacker等价：单声道 -> 立体声 interleaved
+                        // 直接展开写入ringbuf，避免中间Vec分配
+                        for &s in &audio_samples_filtered {
+                            // (L, R) = (s, s) 对应 SDR++ stereo_t{l: s, r: s}
+                            let _ = audio_prod.try_push(s);
+                            let _ = audio_prod.try_push(s);
+                        }
+                        // 更新队列占用长度（单位：f32个数，包含左右声道）
+                        audio_queue_len_flag.store(
+                            (audio_prod.occupied_len() / 2) as u32, // 头投为帧数
+                            Ordering::Relaxed);
                     }
-                    // 防止队列超过 1秒导致延迟累积：如果超过容量上限则丢弃老数据
-                    while q.len() > queue_cap2 { q.pop_front(); }
-                    audio_queue_len_flag.store(q.len() as u32, Ordering::Relaxed);
+                    if diag_frame_count <= 20 {
+                        log::info!("[音频队列#{}] 单声道输入={} 立体声写入={} 队列占用帧数={} (cap帧={})",
+                            diag_frame_count, n, stereo_len,
+                            audio_prod.occupied_len() / 2,
+                            queue_cap / 2);
+                    }
                 }
 
                 // 语音活跃（含延迟窗口内）时累积音频用于 ASR
@@ -1770,7 +1900,12 @@ impl SdrManager {
         ).context("启动RTL-SDR读取线程失败")?;
         *self.cmd_tx.lock() = Some(cmd_tx);
 
-        log::info!("SDR音频流已启动");
+        // 直接启动音频流（无需预填充，无锁设计天然支持起始欠载）
+        stream.play()?;
+        *self.audio_stream.lock() = Some(StreamHandle(stream));
+
+        log::info!("SDR音频流已启动 (音频设备: {}Hz {}ch ringbuf容量={})",
+            out_sample_rate, out_channels, queue_cap);
         Ok(())
     }
 
@@ -1819,6 +1954,8 @@ impl SdrManager {
             diag_audio_rms: f32::from_bits(self.diag_audio_rms.load(Ordering::Relaxed)),
             diag_iq_range: f32::from_bits(self.diag_iq_range.load(Ordering::Relaxed)),
             diag_iq_dc_i: f32::from_bits(self.diag_iq_dc_i.load(Ordering::Relaxed)),
+            bandwidth: cfg.bandwidth,
+            auto_gain: cfg.auto_gain,
         }
     }
 

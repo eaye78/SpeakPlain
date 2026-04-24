@@ -76,6 +76,8 @@ mel_filter = "0.1"
 
 # SDR Support - 使用 rust-rtlsdr crate 直接调用 librtlsdr 库
 rtlsdr = "0.1"
+# 无锁 SPSC 环形缓冲区 - 用于 DSP→cpal 音频流（替代 Mutex<VecDeque>，消除音频回调抖动）
+ringbuf = "0.4"
 
 
 
@@ -84,3 +86,7 @@ rtlsdr = "0.1"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# dev 模式启用优化，解决 DSP（FIR滤波器）debug 模式下性能极差问题
+[profile.dev]
+opt-level = 2

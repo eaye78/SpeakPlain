@@ -3,3 +3,7 @@
 # 下载地址: https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip
 # 解压后将 lib\onnxruntime.dll 放到下面路径
 ORT_DYLIB_PATH = "D:/projects/SpeakPlain/speakplain/lib/onnxruntime.dll"
+
+# dev 模式启用 O2 优化，解决 FIR 滤波器在 debug 模式下极慢（~33ms/帧 → ~2ms/帧）
+[profile.dev]
+opt-level = 2

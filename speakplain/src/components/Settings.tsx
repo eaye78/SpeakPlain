@@ -20,6 +20,7 @@ import {
   Slider,
   Alert,
   Steps,
+  Popconfirm,
 } from "antd";
 import {
   KeyOutlined,
@@ -206,10 +207,20 @@ interface SdrStatus {
   ctcss_threshold: number;
   ctcss_detected: boolean;
   ctcss_strength: number;
+  bandwidth: number;
+  auto_gain: boolean;
 }
 
 type InputSource = "microphone" | "sdr";
 type DemodMode = "nbfm" | "wbfm" | "am" | "usb" | "lsb";
+
+// SDR 频道预设
+interface SdrChannel {
+  id: string;
+  name: string;
+  frequency_mhz: number;
+  ctcss_tone: number;
+}
 
 interface SdrConfig {
   enabled: boolean;
@@ -294,8 +305,16 @@ function Settings({ activeTab }: SettingsProps) {
   const [sdrLoading, setSdrLoading] = useState(false);
   const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<number | null>(null);
   const [sdrSignal, setSdrSignal] = useState(0);
+  const [broadcastFreq, setBroadcastFreq] = useState(95.92805);
   const [zadigLoading, setZadigLoading] = useState(false);
   const [showSdrAdvanced, setShowSdrAdvanced] = useState(false);
+  // 频道管理状态
+  const [sdrChannels, setSdrChannels] = useState<SdrChannel[]>([]);
+  const [channelModalOpen, setChannelModalOpen] = useState(false);
+  const [editingChannel, setEditingChannel] = useState<Partial<SdrChannel> | null>(null);
+  const [channelForm] = Form.useForm();
+  // 频率输入框本地受控 state（避免输入中途被轮询重置）
+  const [freqInputVal, setFreqInputVal] = useState<number | null>(null);
   const sdrSignalTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -1015,16 +1034,18 @@ function Settings({ activeTab }: SettingsProps) {
 
   const loadSdrData = async () => {
     try {
-      const [devices, allDevs, status, inputSource] = await Promise.all([
+      const [devices, allDevs, status, inputSource, channels] = await Promise.all([
         invoke<SdrDeviceInfo[]>("sdr_get_devices"),
         invoke<string[]>("sdr_get_all_output_devices"),
         invoke<SdrStatus>("sdr_get_status"),
         invoke<InputSource>("sdr_get_input_source"),
+        invoke<SdrChannel[]>("sdr_get_channels"),
       ]);
       setSdrDevices(devices);
       setSdrAllDevices(allDevs);
       setSdrStatus(status);
       setSdrSignal(status.signal_strength);
+      setSdrChannels(channels);
       // 若只有一台设备且未连接，自动预选
       setSelectedDeviceIndex(prev => {
         if (prev !== null) return prev;
@@ -1041,7 +1062,11 @@ function Settings({ activeTab }: SettingsProps) {
         input_source: inputSource,
         ctcss_tone: status.ctcss_tone,
         ctcss_threshold: status.ctcss_threshold,
+        bandwidth: status.bandwidth,
+        auto_gain: status.auto_gain,
       }));
+      // 同步频率输入框的本地值
+      setFreqInputVal(status.frequency_mhz);
     } catch (err) {
       console.error("加载SDR数据失败:", err);
     }
@@ -1107,12 +1132,72 @@ function Settings({ activeTab }: SettingsProps) {
   };;
 
   const handleSdrSetFrequency = async (freq: number) => {
+    const rounded = Math.round(freq * 1000) / 1000;
     try {
-      await invoke("sdr_set_frequency", { freqMhz: freq });
-      setSdrConfig(prev => ({ ...prev, frequency_mhz: freq }));
-      message.success(`频率已设置为 ${freq} MHz`);
+      await invoke("sdr_set_frequency", { freqMhz: rounded });
+      setSdrConfig(prev => ({ ...prev, frequency_mhz: rounded }));
+      setFreqInputVal(rounded);
     } catch (err: any) {
       message.error("设置频率失败: " + err);
+    }
+  };
+
+  // 频道管理 handlers
+  const loadChannels = async () => {
+    try {
+      const channels = await invoke<SdrChannel[]>("sdr_get_channels");
+      setSdrChannels(channels);
+    } catch {}
+  };
+
+  const handleApplyChannel = async (channelId: string) => {
+    try {
+      await invoke("sdr_apply_channel", { channelId });
+      await loadSdrData();
+      message.success("已切换频道");
+    } catch (err: any) {
+      message.error("切换频道失败: " + err);
+    }
+  };
+
+  const handleOpenChannelModal = (ch?: SdrChannel) => {
+    if (ch) {
+      setEditingChannel(ch);
+      channelForm.setFieldsValue({ name: ch.name, frequency_mhz: ch.frequency_mhz, ctcss_tone: ch.ctcss_tone === 0 ? "none" : ch.ctcss_tone });
+    } else {
+      setEditingChannel({});
+      channelForm.setFieldsValue({ name: "", frequency_mhz: sdrConfig.frequency_mhz, ctcss_tone: "none" });
+    }
+    setChannelModalOpen(true);
+  };
+
+  const handleSaveChannel = async () => {
+    try {
+      const values = await channelForm.validateFields();
+      const freq = Math.round(parseFloat(values.frequency_mhz) * 1000) / 1000;
+      const ctcss = values.ctcss_tone === "none" ? 0 : parseFloat(values.ctcss_tone);
+      const channel: SdrChannel = {
+        id: editingChannel?.id || "",
+        name: values.name,
+        frequency_mhz: freq,
+        ctcss_tone: ctcss,
+      };
+      await invoke("sdr_save_channel", { channel });
+      message.success("频道已保存");
+      setChannelModalOpen(false);
+      await loadChannels();
+    } catch (err: any) {
+      if (typeof err === "string") message.error("保存失败: " + err);
+    }
+  };
+
+  const handleDeleteChannel = async (channelId: string) => {
+    try {
+      await invoke("sdr_delete_channel", { channelId });
+      message.success("已删除");
+      await loadChannels();
+    } catch (err: any) {
+      message.error("删除失败: " + err);
     }
   };
 
@@ -1180,6 +1265,33 @@ function Settings({ activeTab }: SettingsProps) {
       setSdrConfig(prev => ({ ...prev, bandwidth }));
     } catch (err: any) {
       message.error("设置带宽失败: " + err);
+    }
+  };
+
+  // 【临时测试】收听本地 FM 广播
+  const handleListenBroadcast = async () => {
+    try {
+      setSdrLoading(true);
+      await invoke("sdr_test_broadcast", { freqMhz: broadcastFreq });
+      message.success(`已启动 FM ${broadcastFreq}MHz 广播接收`);
+      await loadSdrData();
+      // 启动信号强度轮询
+      if (sdrSignalTimerRef.current) clearInterval(sdrSignalTimerRef.current);
+      const timer = setInterval(async () => {
+        try {
+          const [strength, status] = await Promise.all([
+            invoke<number>("sdr_get_signal_strength"),
+            invoke<SdrStatus>("sdr_get_status"),
+          ]);
+          setSdrSignal(strength);
+          setSdrStatus(status);
+        } catch {}
+      }, 300);
+      sdrSignalTimerRef.current = timer;
+    } catch (err: any) {
+      message.error("收听广播失败: " + err);
+    } finally {
+      setSdrLoading(false);
     }
   };
 
@@ -1432,41 +1544,78 @@ function Settings({ activeTab }: SettingsProps) {
           }
         >
           <Space direction="vertical" style={{ width: "100%" }}>
-            <Space wrap>
+            {/* 频率输入 + 频道快选 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
               <InputNumber
                 min={22}
                 max={1100}
                 step={0.001}
                 precision={3}
-                value={sdrConfig.frequency_mhz}
-                onChange={(val) => val && handleSdrSetFrequency(val)}
+                value={freqInputVal ?? sdrConfig.frequency_mhz}
+                onChange={(val) => setFreqInputVal(val)}
+                onBlur={() => { if (freqInputVal !== null) handleSdrSetFrequency(freqInputVal); }}
+                onPressEnter={() => { if (freqInputVal !== null) handleSdrSetFrequency(freqInputVal); }}
                 addonAfter="MHz"
                 style={{ width: 180 }}
                 disabled={!sdrStatus?.connected}
               />
-              <Button
-                onClick={() => handleSdrSetFrequency(144.500)}
-                disabled={!sdrStatus?.connected}
-                size="small"
-              >
-                144.500 MHz
-              </Button>
-              <Button
-                onClick={() => handleSdrSetFrequency(430.000)}
-                disabled={!sdrStatus?.connected}
-                size="small"
-              >
-                430.000 MHz
-              </Button>
-              <Button
-                onClick={() => handleSdrSetFrequency(438.625)}
-                disabled={!sdrStatus?.connected}
-                size="small"
-              >
-                438.625 MHz
-              </Button>
-            </Space>
-            <Text type="secondary">将频率设置为与手台相同，常见对讲机频段：144MHz / 430MHz / 438.625MHz</Text>
+              {/* 频道标签 */}
+              {sdrChannels.map(ch => {
+                const isActive = Math.abs(sdrConfig.frequency_mhz - ch.frequency_mhz) < 0.0005 && sdrConfig.ctcss_tone === ch.ctcss_tone;
+                return (
+                  <Tooltip
+                    key={ch.id}
+                    title={
+                      <div style={{ fontSize: 12, lineHeight: 1.8 }}>
+                        <div>{ch.frequency_mhz.toFixed(3)} MHz{ch.ctcss_tone > 0 ? ` · 亚音 ${ch.ctcss_tone}Hz` : ""}</div>
+                        <div style={{ display: "flex", gap: 10, marginTop: 2 }}>
+                          <span style={{ cursor: "pointer", color: "#91caff" }}
+                            onClick={(e) => { e.stopPropagation(); handleOpenChannelModal(ch); }}>编辑</span>
+                          <Popconfirm title="确认删除?" onConfirm={() => handleDeleteChannel(ch.id)} okText="删除" cancelText="取消">
+                            <span style={{ cursor: "pointer", color: "#ff7875" }}>删除</span>
+                          </Popconfirm>
+                        </div>
+                      </div>
+                    }
+                    placement="bottom"
+                    trigger="hover"
+                    color="#1d1d1d"
+                  >
+                    <div
+                      onClick={() => sdrStatus?.connected && handleApplyChannel(ch.id)}
+                      style={{
+                        display: "inline-flex", alignItems: "baseline", gap: 4,
+                        padding: "3px 8px",
+                        borderRadius: 4,
+                        border: `1px solid ${isActive ? "#1677ff" : "#d9d9d9"}`,
+                        background: isActive ? "#e6f4ff" : "transparent",
+                        cursor: sdrStatus?.connected ? "pointer" : "default",
+                        opacity: sdrStatus?.connected ? 1 : 0.45,
+                        transition: "all 0.15s",
+                        userSelect: "none",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      <span style={{ fontSize: 12, fontWeight: isActive ? 600 : 400, color: isActive ? "#1677ff" : "#333" }}>
+                        {ch.name}
+                      </span>
+                      <span style={{ fontSize: 11, color: isActive ? "#1677ff" : "#999", fontFamily: "monospace" }}>
+                        {ch.frequency_mhz.toFixed(3)}
+                      </span>
+                    </div>
+                  </Tooltip>
+                );
+              })}
+              <Tooltip title="新增频道">
+                <Button
+                  type="dashed"
+                  size="small"
+                  icon={<PlusOutlined />}
+                  style={{ padding: "0 6px", height: 26 }}
+                  onClick={() => handleOpenChannelModal()}
+                />
+              </Tooltip>
+            </div>
           </Space>
         </Card>
 
@@ -1599,35 +1748,14 @@ function Settings({ activeTab }: SettingsProps) {
                         <Text style={{ fontSize: 12 }}>{sdrStatus?.vad_active ? "正在接收信号..." : "等待信号"}</Text>
                         <Text style={{ fontSize: 12 }}>|信号强度：{Math.min(100, Math.round(sdrSignal * 100))}%</Text>
                       </Space>
-                      <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f5f5f5", padding: "6px 8px", borderRadius: 4, lineHeight: 1.8 }}>
-                        <div>📡 <b>接收频率:</b> {sdrStatus?.frequency_mhz?.toFixed(3) ?? "—"} MHz | IQ采样率: {sdrStatus?.debug_sample_rate?.toLocaleString() ?? "—"} Hz</div>
-                        <div>🔇 <b>CTCSS亚音:</b> {sdrStatus?.ctcss_tone && sdrStatus.ctcss_tone > 0 ? (
-                          <>
-                            {sdrStatus.ctcss_tone.toFixed(1)} Hz 
-                            <span style={{marginLeft: 8}}>
-                              {sdrStatus.ctcss_detected ? "🟢" : "🔴"}
-                            </span>
-                          </>
-                        ) : "未启用"}</div>
-                        <div>🔊 音频输出采样率: {sdrStatus?.debug_out_sample_rate?.toLocaleString() ?? "—"} Hz | 队列长度: {sdrStatus?.debug_audio_queue_len ?? "—"} 样本</div>
-                        <div>🔧 解调模式: {sdrStatus?.demod_mode?.toUpperCase() ?? "—"} | PPM: {sdrStatus?.ppm_correction ?? 0} | VAD阈值: {sdrConfig.vad_threshold.toFixed(3)} | 带宽: {sdrConfig.bandwidth.toLocaleString()} Hz</div>
-                        <div>💻 增益: {sdrStatus?.gain_db ?? "—"} dB | 音频流: {sdrStatus?.streaming ? "运行中" : "已停止"}</div>
-                        <div style={{borderTop: "1px solid #ddd", marginTop: 4, paddingTop: 4}}><b>🔬 DSP诊断</b></div>
-                        <div>IQ幅度范围: <b>{sdrStatus?.diag_iq_range?.toFixed(4) ?? "—"}</b>
-                          {" "}<span style={{color: (sdrStatus?.diag_iq_range ?? 0) > 0.05 ? "green" : (sdrStatus?.diag_iq_range ?? 0) > 0.01 ? "orange" : "red"}}>
-                            {(sdrStatus?.diag_iq_range ?? 0) > 0.1 ? "✅信号强" : (sdrStatus?.diag_iq_range ?? 0) > 0.02 ? "⚠️信号弱" : "❌无信号(频率偏差?)"}
+                      <div style={{ fontFamily: "monospace", fontSize: 11, background: "#f5f5f5", padding: "4px 8px", borderRadius: 4, lineHeight: 1.8 }}>
+                        <span>📡 {sdrStatus?.frequency_mhz?.toFixed(3) ?? "—"} MHz</span>
+                        <span style={{ marginLeft: 12 }}>🔧 {sdrStatus?.demod_mode?.toUpperCase() ?? "—"} | {sdrStatus?.gain_db ?? "—"} dB</span>
+                        {sdrStatus?.ctcss_tone && sdrStatus.ctcss_tone > 0 && (
+                          <span style={{ marginLeft: 12 }}>
+                            🔇 {sdrStatus.ctcss_tone.toFixed(1)} Hz {sdrStatus.ctcss_detected ? "🟢" : "🔴"}
                           </span>
-                        </div>
-                        <div>IQ直流偏置(I): <b>{sdrStatus?.diag_iq_dc_i?.toFixed(4) ?? "—"}</b>
-                          {" "}<span style={{color: Math.abs(sdrStatus?.diag_iq_dc_i ?? 0) < 0.05 ? "green" : "orange"}}>
-                            {Math.abs(sdrStatus?.diag_iq_dc_i ?? 0) < 0.05 ? "✅正常" : "⚠️偏置大(需调PPM)"}
-                          </span>
-                        </div>
-                        <div>解调音频RMS: <b>{sdrStatus?.diag_audio_rms?.toFixed(5) ?? "—"}</b>
-                          {" "}<span style={{color: (sdrStatus?.diag_audio_rms ?? 0) > 0.005 ? "green" : (sdrStatus?.diag_audio_rms ?? 0) > 0.001 ? "orange" : "red"}}>
-                            {(sdrStatus?.diag_audio_rms ?? 0) > 0.01 ? "✅音频正常" : (sdrStatus?.diag_audio_rms ?? 0) > 0.001 ? "⚠️音频弱" : "❌音频异常(解调失败?)"}
-                          </span>
-                        </div>
+                        )}
                       </div>
                     </Space>
                   }
@@ -2003,6 +2131,40 @@ function Settings({ activeTab }: SettingsProps) {
                 <Select.Option key={key.code} value={key.code}>
                   {key.name}
                 </Select.Option>
+              ))}
+            </Select>
+          </Form.Item>
+        </Form>
+      </Modal>
+
+      {/* 频道编辑弹窗 */}
+      <Modal
+        title={editingChannel?.id ? "编辑频道" : "新增频道"}
+        open={channelModalOpen}
+        onOk={handleSaveChannel}
+        onCancel={() => setChannelModalOpen(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Form form={channelForm} layout="vertical">
+          <Form.Item name="name" label="频道名称" rules={[{ required: true, message: "请输入频道名称" }]}>
+            <Input placeholder="如：业余144" maxLength={20} />
+          </Form.Item>
+          <Form.Item name="frequency_mhz" label="频率 (MHz)" rules={[{ required: true, message: "请输入频率" }]}>
+            <InputNumber
+              min={22}
+              max={1100}
+              step={0.001}
+              precision={3}
+              style={{ width: "100%" }}
+              placeholder="如：438.625"
+            />
+          </Form.Item>
+          <Form.Item name="ctcss_tone" label="CTCSS 亚音">
+            <Select>
+              <Select.Option value="none">不使用</Select.Option>
+              {[67.0,71.9,74.4,77.0,79.7,82.5,85.4,88.5,91.5,94.8,97.4,100.0,103.5,107.2,110.9,114.8,118.8,123.0,127.3,131.8,136.5,141.3,146.2,151.4,156.7,162.2,167.9,173.8,179.9,186.2,192.8,203.5,210.7,218.1,225.7,233.6,241.8,250.3].map(hz => (
+                <Select.Option key={hz} value={hz}>{hz.toFixed(1)} Hz</Select.Option>
               ))}
             </Select>
           </Form.Item>

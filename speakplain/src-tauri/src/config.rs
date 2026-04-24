@@ -4,6 +4,15 @@ use crate::storage::Storage;
 use crate::hotkey::key_codes;
 use crate::sdr::InputSource;
 
+/// SDR 频道预设
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SdrChannel {
+    pub id: String,           // 唯一ID
+    pub name: String,         // 频道名称
+    pub frequency_mhz: f64,   // 频率(MHz)，保留3位小数
+    pub ctcss_tone: f32,      // CTCSS亚音(Hz)，0表示不使用
+}
+
 /// 修饰键类型
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ModifierKey {
@@ -97,6 +106,7 @@ pub struct AppConfig {
     pub sdr_ctcss_tone: f32,          // CTCSS亚音频频率(Hz)，0表示禁用
     pub sdr_ctcss_threshold: f32,     // CTCSS检测门限
     pub sdr_bandwidth: u32,            // SDR带宽(Hz)，默认150000匹配SDR++
+    pub sdr_channels: Vec<SdrChannel>, // 频道预设列表
 }
 
 impl Default for AppConfig {
@@ -154,6 +164,11 @@ impl Default for AppConfig {
             sdr_ctcss_tone: 85.4,       // 默认CTCSS频率
             sdr_ctcss_threshold: 0.005,  // 降低门限到0.5%
             sdr_bandwidth: 150_000,      // 匹配SDR++带宽150kHz
+            sdr_channels: vec![          // 内置常见频道
+                SdrChannel { id: "ch1".to_string(), name: "业余144".to_string(), frequency_mhz: 144.500, ctcss_tone: 0.0 },
+                SdrChannel { id: "ch2".to_string(), name: "业余430".to_string(), frequency_mhz: 430.000, ctcss_tone: 0.0 },
+                SdrChannel { id: "ch3".to_string(), name: "业余438".to_string(), frequency_mhz: 438.625, ctcss_tone: 85.4 },
+            ],
         }
     }
 }
@@ -347,6 +362,11 @@ impl AppConfig {
                 config.sdr_bandwidth = bw;
             }
         }
+        if let Ok(Some(value)) = storage.get_setting("sdr_channels") {
+            if let Ok(channels) = serde_json::from_str::<Vec<SdrChannel>>(&value) {
+                config.sdr_channels = channels;
+            }
+        }
 
         Ok(config)
     }
@@ -393,6 +413,7 @@ impl AppConfig {
         storage.set_setting("sdr_ctcss_tone", &self.sdr_ctcss_tone.to_string())?;
         storage.set_setting("sdr_ctcss_threshold", &self.sdr_ctcss_threshold.to_string())?;
         storage.set_setting("sdr_bandwidth", &self.sdr_bandwidth.to_string())?;
+        storage.set_setting("sdr_channels", &serde_json::to_string(&self.sdr_channels)?)?;
 
         Ok(())
     }
