@@ -305,7 +305,6 @@ function Settings({ activeTab }: SettingsProps) {
   const [sdrLoading, setSdrLoading] = useState(false);
   const [selectedDeviceIndex, setSelectedDeviceIndex] = useState<number | null>(null);
   const [sdrSignal, setSdrSignal] = useState(0);
-  const [broadcastFreq, setBroadcastFreq] = useState(95.92805);
   const [zadigLoading, setZadigLoading] = useState(false);
   const [showSdrAdvanced, setShowSdrAdvanced] = useState(false);
   // 频道管理状态
@@ -1265,33 +1264,6 @@ function Settings({ activeTab }: SettingsProps) {
       setSdrConfig(prev => ({ ...prev, bandwidth }));
     } catch (err: any) {
       message.error("设置带宽失败: " + err);
-    }
-  };
-
-  // 【临时测试】收听本地 FM 广播
-  const handleListenBroadcast = async () => {
-    try {
-      setSdrLoading(true);
-      await invoke("sdr_test_broadcast", { freqMhz: broadcastFreq });
-      message.success(`已启动 FM ${broadcastFreq}MHz 广播接收`);
-      await loadSdrData();
-      // 启动信号强度轮询
-      if (sdrSignalTimerRef.current) clearInterval(sdrSignalTimerRef.current);
-      const timer = setInterval(async () => {
-        try {
-          const [strength, status] = await Promise.all([
-            invoke<number>("sdr_get_signal_strength"),
-            invoke<SdrStatus>("sdr_get_status"),
-          ]);
-          setSdrSignal(strength);
-          setSdrStatus(status);
-        } catch {}
-      }, 300);
-      sdrSignalTimerRef.current = timer;
-    } catch (err: any) {
-      message.error("收听广播失败: " + err);
-    } finally {
-      setSdrLoading(false);
     }
   };
 
