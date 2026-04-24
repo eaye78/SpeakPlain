@@ -402,11 +402,6 @@ SpeakPlain/
 - [x] Zadig 驱动安装集成（应用内一键启动）
 - [x] SDR 音频 48kHz → 16kHz 自动降采样后送入 ASR
 
-### 🔜 第五阶段（敬请期待）
-- [ ] 上下文记忆功能
-- [ ] 流式生成响应
-- [ ] 多频点轮询监听
-
 ## 🙏 致谢
 
 ### 开源项目
@@ -424,6 +419,7 @@ SpeakPlain/
 - [VoiceSnap](https://github.com/qiuqiu-77/VoiceSnap) - 语音输入工具参考
 - [ququ](https://github.com/qiuqiu-77/ququ) - 语音交互方案参考
 - [vocotype-cli](https://github.com/qiuqiu-77/vocotype-cli) - 语音输入 CLI 工具参考
+- [SDR++](https://github.com/AlexandreRouma/SDRPlusPlus) - 跨平台 SDR 软件接收机，无线电功能参考
 
 ---
 
