@@ -192,24 +192,62 @@ npm run tauri build
 
 ```
 SpeakPlain/
-├── speakplain/          # 前端应用 (React + TypeScript + Tauri)
+├── speakplain/              # 前端应用 (React + TypeScript + Tauri)
 │   ├── src/
-│   │   ├── components/  # React 组件
-│   │   ├── themes/      # 主题皮肤系统
-│   │   ├── stores/      # 状态管理
+│   │   ├── components/      # React 组件
+│   │   ├── themes/          # 主题皮肤系统
+│   │   ├── stores/          # 状态管理
 │   │   └── ...
-│   ├── src-tauri/       # Tauri 后端 (Rust)
+│   ├── src-tauri/           # Tauri 后端 (Rust)
 │   │   ├── src/
-│   │   │   ├── main.rs      # 主入口
-│   │   │   ├── asr.rs       # 语音识别引擎
-│   │   │   ├── audio.rs     # 音频录制
-│   │   │   ├── hotkey.rs    # 热键管理
-│   │   │   ├── indicator.rs # 悬浮窗
-│   │   │   └── ...
-│   │   └── icons/       # 应用图标
-│   └── skins/           # 主题皮肤目录
-├── scripts/             # 工具脚本
-└── models/              # AI 模型文件 (运行时下载)
+│   │   │   ├── main.rs              # 主入口
+│   │   │   ├── app_setup.rs         # 应用启动初始化
+│   │   │   ├── app_state.rs         # 全局状态管理
+│   │   │   ├── audio.rs             # 音频录制与设备管理
+│   │   │   ├── asr.rs               # ASR 引擎调度
+│   │   │   ├── asr_sensevoice/      # SenseVoice 引擎目录模块
+│   │   │   │   ├── mod.rs           # 公共 API
+│   │   │   │   ├── model.rs         # ONNX Session 构建
+│   │   │   │   ├── feature.rs       # 音频特征提取 (Fbank/LFR/CMVN)
+│   │   │   │   └── decode.rs        # CTC 解码与 token 映射
+│   │   │   ├── asr_qwen3asr/        # Qwen3-ASR 引擎目录模块
+│   │   │   ├── command.rs           # 指令模式（语音 → 按键映射）
+│   │   │   ├── commands/            # Tauri 前端命令
+│   │   │   │   ├── recording.rs     # 录音控制
+│   │   │   │   ├── history.rs       # 历史记录
+│   │   │   │   ├── config_cmd.rs    # 配置与皮肤
+│   │   │   │   ├── asr_cmd.rs       # ASR 引擎切换
+│   │   │   │   ├── llm_cmd.rs       # LLM 人设/提供方管理
+│   │   │   │   ├── sdr_cmd.rs       # SDR 无线电控制
+│   │   │   │   └── indicator_cmd.rs # 悬浮窗控制
+│   │   │   ├── config/              # 配置系统
+│   │   │   │   ├── model.rs         # AppConfig 定义
+│   │   │   │   └── persistence.rs   # 数据库持久化
+│   │   │   ├── hotkey.rs            # 全局热键管理
+│   │   │   ├── indicator.rs         # 悬浮窗状态与 UI 反馈
+│   │   │   ├── input.rs             # 文本粘贴与键盘模拟
+│   │   │   ├── llm/                 # LLM 润色系统
+│   │   │   │   ├── types.rs         # Provider trait 与配置类型
+│   │   │   │   ├── providers.rs     # OpenAI/Ollama 实现
+│   │   │   │   └── client.rs        # 润色请求封装
+│   │   │   ├── pipeline/            # 语音处理管道
+│   │   │   │   ├── mod.rs           # 管道入口
+│   │   │   │   ├── context.rs       # PipelineContext 数据载体
+│   │   │   │   └── stages.rs        # 分阶段处理（ASR→Command→Refine→Output）
+│   │   │   ├── sdr/                 # RTL-SDR 无线电输入
+│   │   │   │   ├── mod.rs
+│   │   │   │   ├── manager.rs       # SDR 设备管理与 VAD
+│   │   │   │   ├── demod.rs         # FM/AM 解调
+│   │   │   │   ├── stream.rs        # IQ 数据流与音频输出
+│   │   │   │   ├── broadcast.rs     # 广播测试
+│   │   │   │   └── channel.rs       # 频道预设管理
+│   │   │   ├── storage.rs           # SQLite 数据库操作
+│   │   │   └── tray.rs              # 系统托盘
+│   │   └── icons/           # 应用图标
+│   └── skins/               # 主题皮肤目录
+├── scripts/                 # 工具脚本
+├── ReleasePackage/          # 发布打包脚本与输出
+└── models/                  # AI 模型文件 (运行时下载)
 ```
 
 ## 🎨 自定义皮肤

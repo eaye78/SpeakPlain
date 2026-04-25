@@ -4829,7 +4829,7 @@ dependencies = [
 
 [[package]]
 name = "speakplain"
-version = "0.3.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "arboard",
