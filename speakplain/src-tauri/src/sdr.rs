@@ -315,9 +315,6 @@ mod hw {
         // DSP 处理批大小：每积累约 10ms 数据（采样率/100）才批量处理
         // 太小 → DSP 调用过于频繁；太大 → 延迟高
         let dsp_batch_bytes = ((sample_rate as usize / 100) * 2).max(4096); // ~10ms
-        log::debug!("[读取] read_len={}B DSP批大小={}B(~{:.1}ms)",
-            read_len, dsp_batch_bytes, dsp_batch_bytes as f32 / (sample_rate as f32 * 2.0) * 1000.0);
-
         // DSP 线程：累积足够数据后批量处理，与读取线程并行
         std::thread::spawn(move || {
             let mut accum: Vec<u8> = Vec::with_capacity(dsp_batch_bytes * 2);
@@ -401,23 +398,21 @@ mod hw {
                         DeviceCommand::SetFrequency(f) => if f != current_freq {
                             if device.set_center_freq(f).is_ok() {
                                 current_freq = f;
-                                log::debug!("实时改频: {} Hz", f);
                             }
                         },
                         DeviceCommand::SetGain(g) => {
                             if device.set_tuner_gain_mode(true).is_ok() && device.set_tuner_gain(g).is_ok() {
-                                log::debug!("实时改增益: {} tenths-dB", g);
+                                // 增益已实时更新
                             }
                         },
                         DeviceCommand::SetAutoGain(en) => {
                             if device.set_tuner_gain_mode(!en).is_ok() {
-                                log::debug!("实时改AGC: {}", if en { "自动" } else { "手动" });
+                                // AGC已实时更新
                             }
                         },
                         DeviceCommand::SetPpm(p) => if p != current_ppm {
                             if device.set_freq_correction(p).is_ok() {
                                 current_ppm = p;
-                                log::debug!("实时改PPM: {}", p);
                             }
                         },
                     }
@@ -771,11 +766,7 @@ impl DspPipeline {
 
         // 2. 检测 IQ 饱和（仅用于诊断，不跳过处理）
         // IqFrontend 已做限幅和 AGC，即使原始 IQ 饱和也能正常处理
-        let iq_saturated = self.diag_iq_range > 1.9;
-        if iq_saturated && self.signal_rms > 1.0 {
-            log::debug!("IQ 饱和 detected: 范围={:.3}, RMS={:.3}，IqFrontend 将自动限幅",
-                self.diag_iq_range, self.signal_rms);
-        }
+        let _iq_saturated = self.diag_iq_range > 1.9 && self.signal_rms > 1.0;
 
         for chunk in iq_bytes.chunks_exact(2) {
             // 原始 IQ 转换为浮点（-1.0 ~ 1.0）
@@ -1551,7 +1542,6 @@ impl SdrManager {
         let mut prev_vad = false;
         let silence_timeout_frames: u32 = 3;
         let mut silence_frames: u32 = 0;
-        let mut diag_frame_count: u32 = 0;
         let mut first_frame_logged = false;
         let mut ctcss_detector: Option<CtcssDetector> = None;
         let mut last_iq_time = std::time::Instant::now();
@@ -1561,10 +1551,10 @@ impl SdrManager {
             &cfg_snap,
             streaming_flag.clone(),
             move |iq_bytes: &[u8]| {
-                let iq_interval = last_iq_time.elapsed();
+                let _iq_interval = last_iq_time.elapsed();
                 last_iq_time = std::time::Instant::now();
                 let dsp_output = pipeline.process(iq_bytes);
-                let process_time = last_iq_time.elapsed();
+                let _process_time = last_iq_time.elapsed();
                 let rms = pipeline.signal_rms;
                 signal_ref.store(rms.to_bits(), Ordering::Relaxed);
                 
@@ -1627,75 +1617,26 @@ impl SdrManager {
                     audio_samples.clone()
                 };
 
-                // 首帧详细诊断：打印原始IQ字节值和统计
+                // 首帧异常诊断：仅在有明显问题时输出 warn
                 if !first_frame_logged {
                     first_frame_logged = true;
-                    let sample16: Vec<u8> = iq_bytes.iter().take(32).cloned().collect();
-                    // 计算前16个IQ对的均值
                     let mean_i = iq_bytes.chunks_exact(2).take(500)
                         .map(|c| c[0] as f32).sum::<f32>() / 500.0;
-                    let mean_q = iq_bytes.chunks_exact(2).take(500)
-                        .map(|c| c[1] as f32).sum::<f32>() / 500.0;
                     let max_i = iq_bytes.chunks_exact(2).take(500)
                         .map(|c| c[0]).max().unwrap_or(0);
                     let min_i = iq_bytes.chunks_exact(2).take(500)
                         .map(|c| c[0]).min().unwrap_or(255);
-                    log::info!(
-                        "[首帧IQ诊断] 字节数={} 帧前32字节={:?} \
-                         I均值={:.1} Q均值={:.1}(正常均为127.4) I范围=[{},{}] \
-                         RMS={:.4} 音频样本数={}",
-                        iq_bytes.len(), sample16,
-                        mean_i, mean_q, min_i, max_i,
-                        rms, audio_samples.len()
-                    );
                     if (mean_i - 127.4).abs() > 10.0 {
-                        log::warn!("[诊断] IQ均值偏差较大（{:.1}），可能为全0或全127，请检查rtl_sdr连接。", mean_i);
+                        log::warn!("[首帧诊断] IQ均值偏差较大（{:.1}），可能为全0或全127，请检查rtl_sdr连接。", mean_i);
                     }
                     if (max_i as i16 - min_i as i16) < 5 {
-                        log::warn!("[诊断] IQ范围过小（{}），可能设备没有在返回IQ数据！", max_i as i16 - min_i as i16);
+                        log::warn!("[首帧诊断] IQ范围过小（{}），可能设备没有在返回IQ数据！", max_i as i16 - min_i as i16);
                     }
-                    
-                    // [首帧音频诊断] - 验证音频样本正常性
-                    if !audio_samples.is_empty() {
-                        let audio_mean = audio_samples.iter().sum::<f32>() / audio_samples.len() as f32;
-                        let audio_max = audio_samples.iter().cloned().fold(f32::MIN, f32::max);
-                        let audio_min = audio_samples.iter().cloned().fold(f32::MAX, f32::min);
-                        let audio_rms = (audio_samples.iter().map(|&x| x * x).sum::<f32>() / audio_samples.len() as f32).sqrt();
-                        log::info!(
-                            "[首帧音频诊断] 样本数={} 均值={:.4} 范围=[{:.4},{:.4}] RMS={:.4} 状态={}",
-                            audio_samples.len(), audio_mean, audio_min, audio_max, audio_rms,
-                            if audio_rms > 0.001 { "正常" } else { "信号弱" }
-                        );
-                    } else {
-                        log::warn!("[首帧音频诊断] 音频样本为空，请检查FM解调是否正常");
+                    if audio_samples.is_empty() {
+                        log::warn!("[首帧诊断] 音频样本为空，请检查FM解调是否正常");
                     }
-                    
-                    // [首帧频偏诊断] - CTCSS检测的关键输入
-                    if !dsp_output.freq_samples.is_empty() {
-                        let freq_mean = dsp_output.freq_samples.iter().sum::<f32>() / dsp_output.freq_samples.len() as f32;
-                        let freq_max = dsp_output.freq_samples.iter().cloned().fold(f32::MIN, f32::max);
-                        let freq_min = dsp_output.freq_samples.iter().cloned().fold(f32::MAX, f32::min);
-                        let freq_rms = (dsp_output.freq_samples.iter().map(|&x| x * x).sum::<f32>() / dsp_output.freq_samples.len() as f32).sqrt();
-                        let freq_range = freq_max - freq_min;
-                        log::info!(
-                            "[首帧频偏诊断] 样本数={} 均值={:.6} 范围=[{:.6},{:.6}] RMS={:.6} 峰峰值={:.6} 状态={}",
-                            dsp_output.freq_samples.len(), freq_mean, freq_min, freq_max, freq_rms, freq_range,
-                            if freq_rms > 0.0001 { "正常" } else { "信号极弱-CTCSS可能检测不到" }
-                        );
-                        // 检查是否有85.4Hz附近的周期性成分（简单自相关）
-                        let sample_rate = pipeline.stage1_rate as f32;
-                        let period_samples = (sample_rate / 85.4).round() as usize;
-                        if dsp_output.freq_samples.len() > period_samples * 2 {
-                            let mut correlation = 0.0f32;
-                            let n = dsp_output.freq_samples.len() - period_samples;
-                            for i in 0..n {
-                                correlation += dsp_output.freq_samples[i] * dsp_output.freq_samples[i + period_samples];
-                            }
-                            correlation /= n as f32;
-                            log::info!("[首帧频偏诊断] 85.4Hz自相关={:.6e} (正值表示可能有周期性成分)", correlation);
-                        }
-                    } else {
-                        log::warn!("[首帧频偏诊断] 频偏样本为空，CTCSS检测器无输入！");
+                    if dsp_output.freq_samples.is_empty() {
+                        log::warn!("[首帧诊断] 频偏样本为空，CTCSS检测器无输入！");
                     }
                 }
 
@@ -1704,47 +1645,7 @@ impl SdrManager {
                 diag_iq_range_ref.store(pipeline.diag_iq_range.to_bits(), Ordering::Relaxed);
                 diag_iq_dc_i_ref.store(pipeline.diag_iq_dc_i.to_bits(), Ordering::Relaxed);
 
-                // 每帧输出 IQ 间隔和 DSP 处理时间（前20帧）
-                diag_frame_count += 1;
-                if diag_frame_count <= 20 {
-                    log::info!("[音频流计时#{}] IQ间隔={:.1}ms DSP处理={:.1}ms 音频产出={} 队列长度={}",
-                        diag_frame_count,
-                        iq_interval.as_secs_f32() * 1000.0,
-                        process_time.as_secs_f32() * 1000.0,
-                        audio_samples.len(),
-                        audio_queue_len_flag.load(Ordering::Relaxed));
-                }
-                if diag_frame_count % 50 == 0 {
-                    let audio_rms_db = if pipeline.diag_audio_rms > 1e-7 {
-                        20.0 * pipeline.diag_audio_rms.log10()
-                    } else { -99.0 };
-                    // 计算 freq_samples RMS（诊断 FM 解调输出幅度）
-                    let freq_rms = if !dsp_output.freq_samples.is_empty() {
-                        (dsp_output.freq_samples.iter().map(|&x| x * x).sum::<f32>() / dsp_output.freq_samples.len() as f32).sqrt()
-                    } else { 0.0 };
-                    let ctcss_status = if ctcss_tone > 0.0 {
-                        let detected_freq = if let Some(ref detector) = ctcss_detector {
-                            detector.detected_freq
-                        } else { 0.0 };
-                        format!("CTCSS={}Hz 检测={} 强度={:.2} 检出频={:.1}", ctcss_tone, ctcss_detected, ctcss_strength, detected_freq)
-                    } else {
-                        "CTCSS=未启用".to_string()
-                    };
-                    log::info!(
-                        "[SDR诊断] 帧#{} IQ功率={:.4} IQ范围={:.3} DC_I={:.4} \
-                         音频RMS={:.5}({:.1}dB) 频偏RMS={:.5} VAD={} 队列={} {}",
-                        diag_frame_count,
-                        rms,
-                        pipeline.diag_iq_range,
-                        pipeline.diag_iq_dc_i,
-                        pipeline.diag_audio_rms,
-                        audio_rms_db,
-                        freq_rms,
-                        vad_ref.load(Ordering::Relaxed),
-                        audio_queue_len_flag.load(Ordering::Relaxed),
-                        ctcss_status
-                    );
-                }
+                // 帧处理完成
 
                 // 推送信号强度回调：基于实际输出到扬声器的音频（audio_samples_filtered）
                 // 与扬声器声音保持一致：CTCSS静音时为0，有声音时随音量变化
@@ -1762,50 +1663,6 @@ impl SdrManager {
                 // IQ 功率无人发射时 ≈0.017，有人发射时 ≈1.4，区分度远优于音频 RMS
                 // squelch_open 阈值 0.15 已在上方基于实测噪底校准，无需用户调整
                 let has_voice = squelch_open;
-                
-                // 诊断：每帧打印VAD信息（前10帧 或 CTCSS检测到时打印详细诊断）
-                let should_log_vad = diag_frame_count < 10 || (ctcss_detected && diag_frame_count < 100);
-                if should_log_vad {
-                    let rms = if audio_samples.is_empty() { 0.0 } else {
-                        (audio_samples.iter().map(|&x| x*x).sum::<f32>() / audio_samples.len() as f32).sqrt()
-                    };
-                    let (ctcss_freq, ctcss_str) = if let Some(ref detector) = ctcss_detector {
-                        (detector.detected_freq, detector.strength)
-                    } else { (0.0, 0.0) };
-                    // freq_samples 统计（帮助诊断 CTCSS）
-                    let (freq_rms, freq_range) = if dsp_output.freq_samples.is_empty() {
-                        (0.0, 0.0f32)
-                    } else {
-                        let min = dsp_output.freq_samples.iter().cloned().fold(f32::MAX, f32::min);
-                        let max = dsp_output.freq_samples.iter().cloned().fold(f32::MIN, f32::max);
-                        let rms = (dsp_output.freq_samples.iter().map(|&x| x*x).sum::<f32>() / dsp_output.freq_samples.len() as f32).sqrt();
-                        (rms, max - min)
-                    };
-                    // audio_samples 详细统计（诊断语音是否正常）
-                    let (audio_min, audio_max, audio_mean) = if audio_samples.is_empty() {
-                        (0.0f32, 0.0f32, 0.0f32)
-                    } else {
-                        let min = audio_samples.iter().cloned().fold(f32::MAX, f32::min);
-                        let max = audio_samples.iter().cloned().fold(f32::MIN, f32::max);
-                        let mean = audio_samples.iter().sum::<f32>() / audio_samples.len() as f32;
-                        (min, max, mean)
-                    };
-                    // audio_samples_filtered 统计（诊断CTCSS静音后输出）
-                    let (filt_min, filt_max, filt_rms) = if audio_samples_filtered.is_empty() {
-                        (0.0f32, 0.0f32, 0.0f32)
-                    } else {
-                        let min = audio_samples_filtered.iter().cloned().fold(f32::MAX, f32::min);
-                        let max = audio_samples_filtered.iter().cloned().fold(f32::MIN, f32::max);
-                        let rms = (audio_samples_filtered.iter().map(|&x| x*x).sum::<f32>() / audio_samples_filtered.len() as f32).sqrt();
-                        (min, max, rms)
-                    };
-                    log::info!("[音频链诊断#{}] CTCSS检测={} 检出频={:.1}Hz 强度={:.2} | 原始音频 范围=[{:.4},{:.4}] 均值={:.4} RMS={:.4} | 滤波后 范围=[{:.4},{:.4}] RMS={:.4} | 频偏 范围={:.4} RMS={:.4} | Squelch={}", 
-                        diag_frame_count, ctcss_detected, ctcss_freq, ctcss_str,
-                        audio_min, audio_max, audio_mean, rms,
-                        filt_min, filt_max, filt_rms,
-                        freq_range, freq_rms,
-                        if squelch_open { "开" } else { "关(静音)" });
-                }
 
                 // ── PTT 静音延迟逻辑 ──────────────────────────────────────
                 // 当前帧有语音：重置静音计数，标记 VAD 活跃
@@ -1862,12 +1719,6 @@ impl SdrManager {
                         audio_queue_len_flag.store(
                             (audio_prod.occupied_len() / 2) as u32, // 头投为帧数
                             Ordering::Relaxed);
-                    }
-                    if diag_frame_count <= 20 {
-                        log::info!("[音频队列#{}] 单声道输入={} 立体声写入={} 队列占用帧数={} (cap帧={})",
-                            diag_frame_count, n, stereo_len,
-                            audio_prod.occupied_len() / 2,
-                            queue_cap / 2);
                     }
                 }
 
