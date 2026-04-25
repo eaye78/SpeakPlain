@@ -21,12 +21,10 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
 
     let menu = Menu::with_items(app, &[&toggle_indicator, &settings, &history, &separator, &quit])?;
 
-    // 将菜单项引用存入全局状态，供事件回调中修改文字
     app.manage(TrayMenuItems {
         toggle_indicator: Arc::new(toggle_indicator.clone()),
     });
 
-    // 加载托盘图标
     let icon = app.default_window_icon().cloned()
         .or_else(|| Image::from_bytes(include_bytes!("../icons/32x32.png")).ok());
 
@@ -36,12 +34,11 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
         .on_menu_event(|app, event| {
             match event.id.as_ref() {
                 "toggle_indicator" => {
-                    let state: tauri::State<crate::AppState> = app.state();
+                    let state: tauri::State<crate::app_state::AppState> = app.state();
                     let ind = state.indicator.lock();
                     let visible = ind.is_visible();
                     if visible {
                         ind.hide();
-                        // 更新菜单文字
                         let items: tauri::State<TrayMenuItems> = app.state();
                         let _ = items.toggle_indicator.set_text("显示悬浮窗");
                     } else {
@@ -64,13 +61,10 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
                     if let Some(tray) = app.tray_by_id("main-tray") {
                         let _ = tray.set_visible(false);
                     }
-                    
-                    // 清理应用资源
                     {
-                        let state: tauri::State<crate::AppState> = app.state();
+                        let state: tauri::State<crate::app_state::AppState> = app.state();
                         state.cleanup();
                     }
-                    
                     app.cleanup_before_exit();
                     std::process::exit(0);
                 }
@@ -82,8 +76,7 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
                 ..
-            } = event
-            {
+            } = event {
                 let app = tray.app_handle();
                 if let Some(window) = app.get_webview_window("main") {
                     if window.is_visible().unwrap_or(false) {
@@ -100,7 +93,6 @@ pub fn create_tray(app: &AppHandle) -> anyhow::Result<()> {
         builder = builder.icon(icon);
     }
 
-    // build() 返回的 TrayIcon 必须存活，通过 manage 持久化
     let tray = builder.build(app)?;
     app.manage(tray);
 

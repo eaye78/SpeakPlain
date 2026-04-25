@@ -164,6 +164,7 @@ impl IndicatorWindow {
         self.hide_gen.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(dead_code)]
     pub fn set_position(&self, x: i32, y: i32) {
         if let Ok(window) = self.ensure_window() {
             let _ = window.set_position(tauri::Position::Physical(

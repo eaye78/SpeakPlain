@@ -16,6 +16,7 @@ pub struct TextPaster {
     clipboard: Clipboard,
     saved_content: Option<String>,
     pub restore_clipboard: bool,
+    pub paste_delay_ms: u64,
 }
 
 impl TextPaster {
@@ -24,6 +25,7 @@ impl TextPaster {
             clipboard: Clipboard::new().expect("无法访问剤贴板"),
             saved_content: None,
             restore_clipboard: true,
+            paste_delay_ms: 100,
         }
     }
 
@@ -50,7 +52,7 @@ impl TextPaster {
         self.clipboard.set_text(text)?;
         thread::sleep(Duration::from_millis(50));
         self.simulate_ctrl_v();
-        thread::sleep(Duration::from_millis(100));
+        thread::sleep(Duration::from_millis(self.paste_delay_ms));
 
         // 恢复剤贴板
         if self.restore_clipboard {
@@ -95,6 +97,7 @@ impl TextPaster {
     #[cfg(not(windows))]
     fn simulate_ctrl_v(&self) {}
 
+    #[allow(dead_code)]
     pub fn set_restore_clipboard(&mut self, restore: bool) {
         self.restore_clipboard = restore;
     }

@@ -78,6 +78,7 @@ impl AudioRecorder {
     }
 
     /// 检测样本中是否存在语音活动（RMS > threshold）
+    #[allow(dead_code)]
     pub fn has_voice_activity(samples: &[f32], threshold: f32) -> bool {
         Self::calculate_rms(samples) > threshold
     }
@@ -258,6 +259,7 @@ impl AudioRecorder {
         self.is_recording.load(Ordering::Relaxed)
     }
 
+    #[allow(dead_code)]
     pub fn get_sample_rate(&self) -> u32 {
         TARGET_SAMPLE_RATE
     }
@@ -274,31 +276,80 @@ impl AudioRecorder {
         Ok(devices)
     }
 
-    /// 切换到指定设备
-    pub fn set_device(&mut self, device_name: &str) -> anyhow::Result<()> {
+    /// 切换到指定设备（None 表示使用默认设备）
+    pub fn set_device(&mut self, device_name: Option<&str>) -> anyhow::Result<()> {
         let host = cpal::default_host();
-        for device in host.input_devices()? {
-            if let Ok(name) = device.name() {
-                if name == device_name {
-                    // 更新设备和原生配置
-                    let supported = device.default_input_config()
-                        .map_err(|e| anyhow::anyhow!("获取设备配置失败: {}", e))?;
-                    self.native_sample_rate = supported.sample_rate().0;
-                    self.native_channels   = supported.channels();
-                    self.native_config = cpal::StreamConfig {
-                        channels:    self.native_channels,
-                        sample_rate: cpal::SampleRate(self.native_sample_rate),
-                        buffer_size: cpal::BufferSize::Default,
-                    };
-                    self.device = device;
-                    info!("切换到音频设备: {} ({}Hz {}ch)",
-                        device_name, self.native_sample_rate, self.native_channels);
-                    return Ok(());
+        let device = if let Some(name) = device_name {
+            let mut found = None;
+            for d in host.input_devices()? {
+                if let Ok(n) = d.name() {
+                    if n == name {
+                        found = Some(d);
+                        break;
+                    }
                 }
             }
-        }
-        Err(anyhow::anyhow!("未找到设备: {}", device_name))
+            found.ok_or_else(|| anyhow::anyhow!("未找到设备: {}", name))?
+        } else {
+            host.default_input_device()
+                .ok_or_else(|| anyhow::anyhow!("未找到默认麦克风设备"))?
+        };
+
+        let supported = device.default_input_config()
+            .map_err(|e| anyhow::anyhow!("获取设备配置失败: {}", e))?;
+        self.native_sample_rate = supported.sample_rate().0;
+        self.native_channels   = supported.channels();
+        self.native_config = cpal::StreamConfig {
+            channels:    self.native_channels,
+            sample_rate: cpal::SampleRate(self.native_sample_rate),
+            buffer_size: cpal::BufferSize::Default,
+        };
+        self.device = device;
+        info!("切换到音频设备: {} ({}Hz {}ch)",
+            device_name.unwrap_or("默认设备"), self.native_sample_rate, self.native_channels);
+        Ok(())
     }
+}
+
+/// 播放简短提示音（非阻塞）
+pub fn play_sound_feedback() {
+    std::thread::spawn(|| {
+        use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+        let host = cpal::default_host();
+        let device = match host.default_output_device() {
+            Some(d) => d,
+            None => return,
+        };
+        let config = match device.default_output_config() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let sample_rate = config.sample_rate().0 as f32;
+        let freq = 880.0f32;
+        let duration = (sample_rate * 0.15) as usize;
+        let mut counter = 0usize;
+
+        let stream = device.build_output_stream(
+            &config.into(),
+            move |data: &mut [f32], _| {
+                for sample in data.iter_mut() {
+                    if counter < duration {
+                        let t = counter as f32 / sample_rate;
+                        *sample = (t * freq * 2.0 * std::f32::consts::PI).sin() * 0.3;
+                        counter += 1;
+                    } else {
+                        *sample = 0.0;
+                    }
+                }
+            },
+            |err| log::error!("音效播放错误: {}", err),
+            None,
+        );
+        if let Ok(s) = stream {
+            let _ = s.play();
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+    });
 }
 
 /// 简单的VAD (语音活动检测)

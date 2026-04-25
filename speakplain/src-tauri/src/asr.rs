@@ -109,6 +109,7 @@ impl ASREngine {
     }
 
     /// 是否使用 GPU
+    #[allow(dead_code)]
     pub fn is_using_gpu(&self) -> bool {
         match self {
             ASREngine::SenseVoice(engine) => engine.is_using_gpu(),
@@ -117,6 +118,7 @@ impl ASREngine {
     }
 
     /// 获取当前引擎类型
+    #[allow(dead_code)]
     pub fn model_type(&self) -> ASRModelType {
         match self {
             ASREngine::SenseVoice(_) => ASRModelType::SenseVoice,

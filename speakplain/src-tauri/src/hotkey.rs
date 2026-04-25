@@ -15,6 +15,7 @@ const LAST_STOP_GUARD_MS: u64 = 500;
 
 pub struct HotkeyManager {
     hotkey_str: Arc<Mutex<String>>,
+    app_handle: Option<AppHandle>,
     pub is_active: Arc<AtomicBool>,
     pub is_freetalk: Arc<AtomicBool>,
     pub last_stop_ms: Arc<AtomicU64>,
@@ -26,6 +27,7 @@ impl HotkeyManager {
     pub fn new() -> Self {
         Self {
             hotkey_str: Arc::new(Mutex::new("F2".to_string())),
+            app_handle: None,
             is_active: Arc::new(AtomicBool::new(false)),
             is_freetalk: Arc::new(AtomicBool::new(false)),
             last_stop_ms: Arc::new(AtomicU64::new(0)),
@@ -81,6 +83,7 @@ impl HotkeyManager {
 
     /// 注册热键字符串 + 启动长按轮询线程（在 setup 阶段调用）
     pub fn init(&mut self, app_handle: AppHandle) -> anyhow::Result<()> {
+        self.app_handle = Some(app_handle.clone());
         let hotkey_str = self.hotkey_str.lock().clone();
         info!("注册热键: {}", hotkey_str);
 
@@ -137,13 +140,24 @@ impl HotkeyManager {
         last_stop_ms.store(now, Ordering::Relaxed);
     }
 
-    pub fn set_hotkey(&self, vk: i32) {
-        // vk 转换为字符串名称存储
+    pub fn set_hotkey(&mut self, vk: i32) {
         let name = vk_to_name(vk);
+        if let Some(ref handle) = self.app_handle {
+            let old = self.hotkey_str.lock().clone();
+            if old != name {
+                if let Err(e) = handle.global_shortcut().unregister(old.as_str()) {
+                    log::warn!("注销旧热键 {} 失败: {}", old, e);
+                }
+                if let Err(e) = handle.global_shortcut().register(name.as_str()) {
+                    log::warn!("注册新热键 {} 失败: {}", name, e);
+                }
+            }
+        }
         *self.hotkey_str.lock() = name;
     }
 
     /// 设置热键时校验是否与指令映射冲突
+    #[allow(dead_code)]
     pub fn set_hotkey_with_validation(
         &self, 
         vk: i32,

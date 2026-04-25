@@ -156,6 +156,7 @@ impl Storage {
     }
 
     /// 添加识别历史
+    #[allow(dead_code)]
     pub fn add_history(&self, text: &str, duration_sec: u32) -> SqlResult<i64> {
         self.conn.execute(
             "INSERT INTO recognition_history (text, duration_sec) VALUES (?1, ?2)",
@@ -222,6 +223,7 @@ impl Storage {
     }
     
     /// 添加自定义词典项
+    #[allow(dead_code)]
     pub fn add_dictionary_item(&self, word: &str, replacement: Option<&str>, category: &str) -> SqlResult<()> {
         let replacement = replacement.unwrap_or(word);
         
@@ -236,6 +238,7 @@ impl Storage {
     }
     
     /// 获取自定义词典
+    #[allow(dead_code)]
     pub fn get_dictionary(&self) -> SqlResult<Vec<(String, String, String)>> {
         let mut stmt = self.conn.prepare(
             "SELECT word, replacement, category FROM custom_dictionary ORDER BY word"
@@ -249,6 +252,7 @@ impl Storage {
     }
     
     /// 删除词典项
+    #[allow(dead_code)]
     pub fn delete_dictionary_item(&self, word: &str) -> SqlResult<()> {
         self.conn.execute(
             "DELETE FROM custom_dictionary WHERE word = ?1",
@@ -359,6 +363,7 @@ impl Storage {
     }
 
     /// 获取所有设置
+    #[allow(dead_code)]
     pub fn get_all_settings(&self) -> SqlResult<Vec<(String, String)>> {
         let mut stmt = self.conn.prepare("SELECT key, value FROM app_settings")?;
         
